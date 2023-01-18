@@ -50,10 +50,10 @@ from math import pi
 from abc import ABCMeta, abstractmethod
 from petsc4py import PETSc
 from mpi4py import MPI
-from scipy.optimize import minimize
+from scipy.optimize import minimize, BFGS, SR1, OptimizeResult
 
 __author__ = "Andrew Michaels"
-__license__ = "BSD-3"
+__license__ = "GPL License, Version 3.0"
 __version__ = "2019.5.6"
 __maintainer__ = "Andrew Michaels"
 __status__ = "development"
@@ -154,7 +154,7 @@ class Optimizer(object):
         EXIT = 2
 
     def __init__(self, am, p0, callback_func=None, opt_method='BFGS', \
-                 Nmax=1000, tol=1e-5, bounds=None, scipy_verbose=True):
+                 Nmax=1000, tol=1e-5, bounds=None, scipy_verbose=True, initial_tr_radius=1.0):
         self.am = am
 
         self.p0 = p0
@@ -169,6 +169,7 @@ class Optimizer(object):
         self.tol = tol
         self.bounds = bounds
         self.scipy_verbose = scipy_verbose
+        self.initial_tr_radius = initial_tr_radius
 
         self._comm = MPI.COMM_WORLD
 
@@ -250,13 +251,22 @@ class Optimizer(object):
             The optimized figure of merit and the corresponding set of optimal
             design parameters.
         """
-        self.__fom(self.p0)
-        self.callback(self.p0)
-        result = minimize(self.__fom, self.p0, method=self.opt_method,
-                          jac=self.__gradient, callback=self.callback,
-                          tol=self.tol, bounds=self.bounds,
-                          options={'maxiter':self.Nmax, \
-                                   'disp':self.scipy_verbose})
+        #self.__fom(self.p0)
+        if self.opt_method == 'trust-constr':
+            result = minimize(self.__fom, self.p0, method=self.opt_method,
+                              jac=self.__gradient, callback=self.callback,
+                              hess=BFGS(exception_strategy="damp_update",min_curvature=0.2),
+                              tol=self.tol, bounds=self.bounds,
+                              options={'maxiter':self.Nmax,
+                                       'initial_tr_radius': self.initial_tr_radius,
+                                       'disp':self.scipy_verbose})
+
+        else:
+            result = minimize(self.__fom, self.p0, method=self.opt_method,
+                              jac=self.__gradient, callback=self.callback,
+                              tol=self.tol, bounds=self.bounds,
+                              options={'maxiter':self.Nmax, \
+                                       'disp':self.scipy_verbose})
 
         command = self.RunCommands.EXIT
         self._comm.bcast(command, root=0)

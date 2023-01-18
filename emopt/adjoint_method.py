@@ -164,9 +164,11 @@ from abc import ABCMeta, abstractmethod
 from petsc4py import PETSc
 from mpi4py import MPI
 from future.utils import with_metaclass
-
+from timeit import default_timer as timer
+from datetime import datetime
+import gc
 __author__ = "Andrew Michaels"
-__license__ = "BSD-3"
+__license__ = "GPL License, Version 3.0"
 __version__ = "2019.5.6"
 __maintainer__ = "Andrew Michaels"
 __status__ = "development"
@@ -487,6 +489,26 @@ class AdjointMethod(with_metaclass(ABCMeta, object)):
         """
         # get the current diagonal elements of A.
         # only these elements change when the design variables change.
+        del self.sim._Ex; del self.sim._Ey; del self.sim._Ez
+        del self.sim._Hx; del self.sim._Hy; del self.sim._Hz
+        gc.collect()
+
+        sim._eps_x_p = sim._da.createGlobalVec()
+        sim._eps_y_p = sim._da.createGlobalVec()
+        sim._eps_z_p = sim._da.createGlobalVec()
+        pos,lens = sim._da.getCorners()
+        k0,j0,i0 = pos
+        K,J,I = lens
+        sim._eps.get_values(k0,k0+K,j0,j0+J,i0,i0+I,
+                            sx=0.5, sy=0.0, sz=-0.5,
+                            arr=sim._eps_x_p.getArray())
+        sim._eps.get_values(k0,k0+K,j0,j0+J,i0,i0+I,
+                            sx=0.0, sy=0.5, sz=-0.5,
+                            arr=sim._eps_y_p.getArray())
+        sim._eps.get_values(k0,k0+K,j0,j0+J,i0,i0+I,
+                            sx=0.0, sy=0.0, sz=0.0,
+                            arr=sim._eps_z_p.getArray())
+
         Ai = sim.get_A_diag()
 
         step = self._step
@@ -500,6 +522,7 @@ class AdjointMethod(with_metaclass(ABCMeta, object)):
 
         gradient = np.zeros(lenp)
         for i in range(lenp):
+            print("param",i+1,"of",lenp,'\033[1A\r')
             p0 = params[i]
             ub = update_boxes[i]
 
@@ -509,25 +532,23 @@ class AdjointMethod(with_metaclass(ABCMeta, object)):
             if(type(ub[0]) == list or type(ub[0]) == np.ndarray or \
                type(ub[0]) == tuple):
                 for box in ub:
-                    self.sim.update(box)
+                    self.sim.perturb(box)
             else:
-                self.sim.update(ub)
-
+                self.sim.perturb(ub)
             # calculate dAdp and assemble the full result on the master node
             product = sim.calc_ydAx(Ai)
             grad_part = -2*np.real( product/step )
             grad_parts.append(grad_part)
 
-            # revert the system to its original state
+            # # revert the system to its original state
             params[i] = p0
-            self.update_system(params)
-            if(type(ub[0]) == list or type(ub[0]) == np.ndarray or \
-               type(ub[0]) == tuple):
-                for box in ub:
-                    self.sim.update(box)
-            else:
-                self.sim.update(ub)
-
+            # self.update_system(params)
+            # if(type(ub[0]) == list or type(ub[0]) == np.ndarray or \
+            #    type(ub[0]) == tuple):
+            #     for box in ub:
+            #         self.sim.update(box)
+            # else:
+            #     self.sim.update(ub)
 
         COMM.Barrier()
         for i in range(lenp):
@@ -539,6 +560,11 @@ class AdjointMethod(with_metaclass(ABCMeta, object)):
             # finish calculating the gradient
             if(NOT_PARALLEL):
                 gradient[i] = np.sum(grad_full)
+
+        sim._eps_x_p.destroy()
+        sim._eps_y_p.destroy()
+        sim._eps_z_p.destroy()
+        del sim._eps_x_p; del sim._eps_y_p; del sim._eps_z_p
 
         if(NOT_PARALLEL):
             return gradient
@@ -579,6 +605,24 @@ class AdjointMethod(with_metaclass(ABCMeta, object)):
         # This should return only non-null on RANK=0
         dFdx = self.calc_dFdx(self.sim, params)
 
+        # Reduce memory footprint of sim._E_fwd_t0 after dFdx calculation
+        self.sim._Hx_fwd_t0.destroy()
+        self.sim._Hy_fwd_t0.destroy()
+        self.sim._Hz_fwd_t0.destroy()
+        del self.sim._Hx_fwd_t0;
+        del self.sim._Hy_fwd_t0;
+        del self.sim._Hz_fwd_t0
+
+        self.sim._Ex_fwd_t0_pbox = self.sim._dap.createGlobalVec()
+        self.sim._Ey_fwd_t0_pbox = self.sim._dap.createGlobalVec()
+        self.sim._Ez_fwd_t0_pbox = self.sim._dap.createGlobalVec()
+        self.sim.get_pbox_field_fwd()
+
+        self.sim._Ex_fwd_t0.destroy()
+        self.sim._Ey_fwd_t0.destroy()
+        self.sim._Ez_fwd_t0.destroy()
+        del self.sim._Ex_fwd_t0; del self.sim._Ey_fwd_t0; del self.sim._Ez_fwd_t0
+
         #if(isinstance(self.sim, fdfd.FDFD_TE)):
         dFdx = comm.bcast(dFdx, root=0)
         #elif(isinstance(self.sim, fdfd.FDFD_3D)):
@@ -588,13 +632,39 @@ class AdjointMethod(with_metaclass(ABCMeta, object)):
         self.sim.set_adjoint_sources(dFdx)
         self.sim.solve_adjoint()
 
+        # Reduce memory footprint of sim._E_adj_t0 after dFdx calculation
+        self.sim._Hx_adj_t0.destroy()
+        self.sim._Hy_adj_t0.destroy()
+        self.sim._Hz_adj_t0.destroy()
+        del self.sim._Hx_adj_t0; del self.sim._Hy_adj_t0; del self.sim._Hz_adj_t0
+
+        self.sim._Ex_adj_t0_pbox = self.sim._dap.createGlobalVec()
+        self.sim._Ey_adj_t0_pbox = self.sim._dap.createGlobalVec()
+        self.sim._Ez_adj_t0_pbox = self.sim._dap.createGlobalVec()
+        self.sim.get_pbox_field_adj()
+
+        self.sim._Ex_adj_t0.destroy()
+        self.sim._Ey_adj_t0.destroy()
+        self.sim._Ez_adj_t0.destroy()
+        del self.sim._Ex_adj_t0; del self.sim._Ey_adj_t0; del self.sim._Ez_adj_t0
+
         if(NOT_PARALLEL):
             info_message('Calculating gradient...')
 
         grad_f = self.calc_gradient(self.sim, params)
         grad_p = self.calc_grad_p(self.sim, params)
 
+        self.sim._Ex_fwd_t0_pbox.destroy()
+        self.sim._Ey_fwd_t0_pbox.destroy()
+        self.sim._Ez_fwd_t0_pbox.destroy()
+        self.sim._Ex_adj_t0_pbox.destroy()
+        self.sim._Ex_adj_t0_pbox.destroy()
+        self.sim._Ex_adj_t0_pbox.destroy()
+        # del self.sim._Ex_fwd_t0_pbox; del self.sim._Ey_fwd_t0_pbox; del self.sim._Ez_fwd_t0_pbox
+        # del self.sim._Ex_adj_t0_pbox; del self.sim._Ey_adj_t0_pbox; del self.sim._Ez_adj_t0_pbox
+
         if(NOT_PARALLEL):
+            self.current_gradient = grad_f
             return grad_f + grad_p
         else:
             return None
@@ -605,7 +675,7 @@ class AdjointMethod(with_metaclass(ABCMeta, object)):
 
         It is highly recommended that the accuracy of the gradients be checked
         prior to being used. If the accuracy is above ~1%, it is likely that
-        there is an inconsitency between how the figure of merit and adjoint
+        there is an inconsistency between how the figure of merit and adjoint
         sources (dFdx) are being computed.
 
         The adjoint method gradient error is evaluated by comparing the
@@ -713,6 +783,558 @@ class AdjointMethod(with_metaclass(ABCMeta, object)):
             if(return_gradients):
                 return None, None, None
             return None
+
+class AdjointMethodMORE(with_metaclass(ABCMeta, AdjointMethod)):
+    """An AdjointMethod object for an ensemble of different figures of merit
+    (Multi-objective adjoint method) - reuse perturbed eps for gradient
+    calculations of all FOMs in one pass
+
+    In many situations, it is desirable to calculate the sensitivities of a
+    structure corresponding to multiple objective functions.  A simple common
+    exmaple of this a broadband figure of merit which considers the performance
+    of structure at a range of different excitation frequencies/wavelengths.
+    In other cases, it may be desirable to calculate a total sensitivity which
+    is made up of two different figures of merit which are calculated for the
+    same excitation.
+
+    In either case, we need a way to easily handle these more complicated
+    figures of merits and their gradients (i.e. the sensitivities). This class
+    provides a simple interface to do just that.  By overriding calc_total_fom
+    and calc_total_gradient, you can build up more complicated figures of
+    merit.
+
+    Parameters
+    ----------
+    ams : list of :class:`.AdjointMethod`
+        A list containing *extended* AdjointMethod objects
+
+    Attributes
+    ----------
+    adjoint_methods : list of :class:`.AdjointMethod`
+        A list containing extended AdjointMethod objects
+    """
+
+    def __init__(self, ams, step=1e-6):
+        self._ams = ams
+        self._foms_current = np.zeros(len(ams))
+        self._step = step
+
+    @property
+    def adjoint_methods(self):
+        return self._ams
+
+    @adjoint_methods.setter
+    def adjoint_methods(self, new_ams):
+        self._ams = new_ams
+
+    def update_system(self, params):
+        """Update all of the individual AdjointMethods."""
+        for am in self._ams:
+            am.update_system(params)
+
+    def calc_fom(self, sim, params):
+        """Calculate the figure of merit.
+        """
+        # this just redirects to calc_total_foms
+        return self.calc_total_fom(self._foms_current)
+
+    def calc_dFdx(self, sim, params):
+        # We dont need this -- all dFdx's are performed by
+        # AdjointMethod objects contained in self._ams
+        pass
+
+    def calc_grad_p(self, sim, params):
+        # We dont need this -- all individual grad_p calculations are handled
+        # by supplied AdjointMethod objects.
+        pass
+
+    @abstractmethod
+    def calc_total_fom(self, foms):
+        """Calculate the 'total' figure of merit based on a list of evaluated
+        objective functions.
+
+        The user should override this function in order to define how all of the
+        individual figures of merit are combined to form a single 'total'
+        figure of merit. This may be a sum of the input FOMs, a minimax of the
+        FOMs, etc.  A common example is to combine figures of merit calculated
+        for different wavelengths of operation.
+
+        See Also
+        --------
+        :ref:`emopt.fomutils` : functions which may be useful for combining figures of merit
+
+        Parameters
+        ----------
+        foms : list of float
+            List containing individual FOMs which are used to compute the total
+            figure of merit.
+
+        Returns
+        -------
+        float
+            The total figure of merit
+        """
+        pass
+
+    @abstractmethod
+    def calc_total_gradient(self, foms, grads):
+        """Calculate the 'total' gradient of a figure of merit based on a list
+        of evaluated objective functions.
+
+        The user should override this function in order to define the gradient
+        of the total figure of merit.
+
+        See Also
+        --------
+        :ref:`emopt.fomutils` : functions which may be useful for combining figures of merit and their gradients.
+
+        Parameters
+        ----------
+        foms : list
+            List of individual foms
+        grads : list
+            List of individual grads
+
+        Returns
+        -------
+        numpy.ndarray
+            1D numpy array containing total gradient. note: the output vector
+            should have the same shape as the input vectors contained in grads
+        """
+        pass
+
+    def fom(self, params):
+        """Calculate the total figure of merit.
+
+        Notes
+        -----
+        Overrides :class:`.AdjointMethod`.fom(...)
+
+        Parameters
+        ----------
+        params : numpy.ndarray
+            Design parameters
+
+        Returns
+        -------
+        float
+            (Master node only) The total figure of merit
+        """
+        foms = []
+
+        for am in self._ams:
+            foms.append(am.fom(params))
+            del am.sim._Ex; del am.sim._Ey; del am.sim._Ez
+            del am.sim._Hx; del am.sim._Hy; del am.sim._Hz
+        gc.collect()
+
+        self._foms_current = foms
+        if(NOT_PARALLEL):
+            fom_total = self.calc_total_fom(foms)
+            return fom_total
+        else:
+            return None
+
+    def gradient(self, params):
+        """Calculate the total gradient.
+
+        Notes
+        -----
+        Overrides :class:`.AdjointMethod`.gradient(...)
+
+        Parameters
+        ----------
+        params : numpy.ndarray
+            Design parameters with respect to which gradient is evaluated
+
+        Returns
+        -------
+        numpy.ndarray
+            (Master node only) The gradient of total figure of merit.
+        """
+        foms = []
+        grads = []
+
+        gc.collect()
+
+        for am in self._ams:
+            am.update_system(params)
+            am.sim.update()
+            if(not np.array_equal(am.prev_params, params)):
+                am.sim.solve_forward()
+
+            # comm = MPI.COMM_WORLD
+            dFdx = am.calc_dFdx(am.sim, params)
+            # dFdx = comm.bcast(dFdx, root=0)
+
+            # Reduce memory footprint after dFdx calculation
+            am.sim._Hx_fwd_t0.destroy()
+            am.sim._Hy_fwd_t0.destroy()
+            am.sim._Hz_fwd_t0.destroy()
+
+            am.sim._Ex_fwd_t0_pbox = am.sim._dap.createGlobalVec()
+            am.sim._Ey_fwd_t0_pbox = am.sim._dap.createGlobalVec()
+            am.sim._Ez_fwd_t0_pbox = am.sim._dap.createGlobalVec()
+            am.sim.get_pbox_field_fwd()
+
+            am.sim._Ex_fwd_t0.destroy()
+            am.sim._Ey_fwd_t0.destroy()
+            am.sim._Ez_fwd_t0.destroy()
+
+            am.sim.set_adjoint_sources(dFdx)
+            am.sim.solve_adjoint()
+
+            # Reduce memory footprint after adjoint simulation
+            am.sim._Hx_adj_t0.destroy()
+            am.sim._Hy_adj_t0.destroy()
+            am.sim._Hz_adj_t0.destroy()
+
+            am.sim._Ex_adj_t0_pbox = am.sim._dap.createGlobalVec()
+            am.sim._Ey_adj_t0_pbox = am.sim._dap.createGlobalVec()
+            am.sim._Ez_adj_t0_pbox = am.sim._dap.createGlobalVec()
+            am.sim.get_pbox_field_adj()
+
+            am.sim._Ex_adj_t0.destroy()
+            am.sim._Ey_adj_t0.destroy()
+            am.sim._Ez_adj_t0.destroy()
+
+            foms.append( am.calc_fom(am.sim, params) )
+            del am.sim._Ex_fwd_t0; del am.sim._Ey_fwd_t0; del am.sim._Ez_fwd_t0
+            del am.sim._Hx_fwd_t0; del am.sim._Hy_fwd_t0; del am.sim._Hz_fwd_t0
+            del am.sim._Ex_adj_t0; del am.sim._Ey_adj_t0; del am.sim._Ez_adj_t0
+            del am.sim._Hx_adj_t0; del am.sim._Hy_adj_t0; del am.sim._Hz_adj_t0
+
+        for am in self._ams:
+            del am.sim._Ex; del am.sim._Ey; del am.sim._Ez;
+            del am.sim._Hx; del am.sim._Hy; del am.sim._Hz;
+        gc.collect()
+
+        pos,lens = self._ams[0].sim._da.getCorners()
+        k0,j0,i0 = pos
+        K,J,I = lens
+        for i in range(len(self._ams)):
+            if i==0:
+                self._ams[i].sim._eps_x_p = self._ams[i].sim._da.createGlobalVec()
+                self._ams[i].sim._eps_y_p = self._ams[i].sim._da.createGlobalVec()
+                self._ams[i].sim._eps_z_p = self._ams[i].sim._da.createGlobalVec()
+                self._ams[i].sim._eps.get_values(k0,k0+K,j0,j0+J,i0,i0+I,
+                                                 sx=0.5, sy=0.0, sz=-0.5,
+                                                 arr=self._ams[i].sim._eps_x_p.getArray())
+                self._ams[i].sim._eps.get_values(k0,k0+K,j0,j0+J,i0,i0+I,
+                                                 sx=0.0, sy=0.5, sz=-0.5,
+                                                 arr=self._ams[i].sim._eps_y_p.getArray())
+                self._ams[i].sim._eps.get_values(k0,k0+K,j0,j0+J,i0,i0+I,
+                                                 sx=0.0, sy=0.0, sz=0.0,
+                                                 arr=self._ams[i].sim._eps_z_p.getArray())
+
+            else:
+                self._ams[i].sim._eps_x_p = self._ams[0].sim._eps_x_p
+                self._ams[i].sim._eps_y_p = self._ams[0].sim._eps_y_p
+                self._ams[i].sim._eps_z_p = self._ams[0].sim._eps_z_p
+
+        Ai = self._ams[0].sim.get_A_diag()
+        step = self._ams[0]._step
+        update_boxes = self._ams[0].get_update_boxes(self._ams[0].sim, params)
+        lenp = len(params)
+
+        if (NOT_PARALLEL):
+            info_message('Calculating gradient...')
+
+        gradient = np.zeros((len(self._ams), lenp))
+        # AdjointMethodMORE is to be used only on single node, so grad_parts == gradient
+        # need to add COMM.Barrier/COMM.gather for parallelized version
+        for i in range(lenp):
+            print("param",i+1,"of",lenp,'\033[1A\r')
+            p0 = params[i]
+            ub = update_boxes[i]
+
+            # perturb the system
+            params[i] += step
+            self._ams[0].update_system(params)
+            if(type(ub[0]) == list or type(ub[0]) == np.ndarray or \
+                type(ub[0]) == tuple):
+                for box in ub:
+                    self._ams[0].sim.perturb(box)
+            else:
+                self._ams[0].sim.perturb(ub)
+
+            # calculate dAdp and assemble the full result on the master node
+            for j in range(len(self._ams)):
+                # clone perturbed eps to all other AM objects than the head
+                if j!=0:
+                    self._ams[j].sim._i0 = self._ams[0].sim._i0
+                    self._ams[j].sim._i1 = self._ams[0].sim._i1
+                gradient[j,i] = -2*np.real( self._ams[j].sim.calc_ydAx(Ai)/step )
+
+            # revert the system to its original state
+            params[i] = p0
+
+        for i in range(len(self._ams)):
+            self._ams[i].current_gradient = gradient[i]
+
+        for am in self._ams:
+            am.sim._eps_x_p.destroy()
+            am.sim._eps_y_p.destroy()
+            am.sim._eps_z_p.destroy()
+            del am.sim._eps_x_p
+            del am.sim._eps_y_p
+            del am.sim._eps_z_p
+            
+            am.sim._Ex_fwd_t0_pbox.destroy()
+            am.sim._Ey_fwd_t0_pbox.destroy()
+            am.sim._Ez_fwd_t0_pbox.destroy()
+            am.sim._Ex_adj_t0_pbox.destroy()
+            am.sim._Ey_adj_t0_pbox.destroy()
+            am.sim._Ez_adj_t0_pbox.destroy()
+
+        if(NOT_PARALLEL):
+            grad_total = self.calc_total_gradient(foms, gradient)
+            return grad_total
+        else:
+            return None
+
+
+    def check_gradient(self, params, indices=[], plot=True, verbose=True,
+                       return_gradients=False, fd_step=1e-10):
+        """Check the gradient of an multi-objective AdjointMethod.
+
+        Parameters
+        ----------
+        params : numpy.ndarray
+            design parameters
+        indices : list or numpy.ndarray
+            list of gradient indices to check. An empty list indicates that the
+            whole gradient should be verified. A subset of indices may be
+            desirable for large problems.  (default = [])
+
+        Returns
+        -------
+        float
+            Relative error in gradient.
+        """
+        # we override this function so we can initially update all of the ams
+        # as desired
+        self.sim = self._ams[0].sim
+        for am in self._ams:
+            am.update_system(params)
+            am.sim.update()
+
+        return super(AdjointMethodMO, self).check_gradient(params, indices, plot,
+                                                           verbose,
+                                                           return_gradients,
+                                                           fd_step)
+
+class AdjointMethodMOSE(with_metaclass(ABCMeta, AdjointMethod)):
+    """An AdjointMethod object for an ensemble of different figures of merit
+    (Multi-objective adjoint method) - sequential execution of multiple objectives
+    that can reuse the same geometry
+
+    In many situations, it is desirable to calculate the sensitivities of a
+    structure corresponding to multiple objective functions.  A simple common
+    exmaple of this a broadband figure of merit which considers the performance
+    of structure at a range of different excitation frequencies/wavelengths.
+    In other cases, it may be desirable to calculate a total sensitivity which
+    is made up of two different figures of merit which are calculated for the
+    same excitation.
+
+    In either case, we need a way to easily handle these more complicated
+    figures of merits and their gradients (i.e. the sensitivities). This class
+    provides a simple interface to do just that.  By overriding calc_total_fom
+    and calc_total_gradient, you can build up more complicated figures of
+    merit.
+
+    Parameters
+    ----------
+    ams : list of :class:`.AdjointMethod`
+        A list containing *extended* AdjointMethod objects
+
+    Attributes
+    ----------
+    adjoint_methods : list of :class:`.AdjointMethod`
+        A list containing extended AdjointMethod objects
+    """
+
+    def __init__(self, ams, step=1e-6):
+        self._ams = ams
+        self._foms_current = np.zeros(len(ams))
+        self._step = step
+        self._grads = []
+
+    @property
+    def adjoint_methods(self):
+        return self._ams
+
+    @adjoint_methods.setter
+    def adjoint_methods(self, new_ams):
+        self._ams = new_ams
+
+    def update_system(self, params):
+        """Update all of the individual AdjointMethods."""
+        for am in self._ams:
+            am.update_system(params)
+
+    def calc_fom(self, sim, params):
+        """Calculate the figure of merit.
+        """
+        # this just redirects to calc_total_foms
+        return self.calc_total_fom(self._foms_current)
+
+    def calc_dFdx(self, sim, params):
+        # We dont need this -- all dFdx's are performed by
+        # AdjointMethod objects contained in self._ams
+        pass
+
+    def calc_grad_p(self, sim, params):
+        # We dont need this -- all individual grad_p calculations are handled
+        # by supplied AdjointMethod objects.
+        pass
+
+    @abstractmethod
+    def calc_total_fom(self, foms):
+        """Calculate the 'total' figure of merit based on a list of evaluated
+        objective functions.
+
+        The user should override this function in order to define how all of the
+        individual figures of merit are combined to form a single 'total'
+        figure of merit. This may be a sum of the input FOMs, a minimax of the
+        FOMs, etc.  A common example is to combine figures of merit calculated
+        for different wavelengths of operation.
+
+        See Also
+        --------
+        :ref:`emopt.fomutils` : functions which may be useful for combining figures of merit
+
+        Parameters
+        ----------
+        foms : list of float
+            List containing individual FOMs which are used to compute the total
+            figure of merit.
+
+        Returns
+        -------
+        float
+            The total figure of merit
+        """
+        pass
+
+    @abstractmethod
+    def calc_total_gradient(self, foms, grads):
+        """Calculate the 'total' gradient of a figure of merit based on a list
+        of evaluated objective functions.
+
+        The user should override this function in order to define the gradient
+        of the total figure of merit.
+
+        See Also
+        --------
+        :ref:`emopt.fomutils` : functions which may be useful for combining figures of merit and their gradients.
+
+        Parameters
+        ----------
+        foms : list
+            List of individual foms
+        grads : list
+            List of individual grads
+
+        Returns
+        -------
+        numpy.ndarray
+            1D numpy array containing total gradient. note: the output vector
+            should have the same shape as the input vectors contained in grads
+        """
+        pass
+
+    def fom(self, params):
+        """Calculate the total figure of merit.
+
+        Notes
+        -----
+        Overrides :class:`.AdjointMethod`.fom(...)
+
+        Parameters
+        ----------
+        params : numpy.ndarray
+            Design parameters
+
+        Returns
+        -------
+        float
+            (Master node only) The total figure of merit
+        """
+        foms = []
+        self._grads = []
+        for am in self._ams:
+            foms.append(am.fom(params))
+            self._grads.append( am.gradient(params))
+
+        self._foms_current = foms
+        if(NOT_PARALLEL):
+            fom_total = self.calc_total_fom(foms)
+            return fom_total
+        else:
+            return None
+
+    def gradient(self, params):
+        """Calculate the total gradient.
+
+        Notes
+        -----
+        Overrides :class:`.AdjointMethod`.gradient(...)
+
+        Parameters
+        ----------
+        params : numpy.ndarray
+            Design parameters with respect to which gradient is evaluated
+
+        Returns
+        -------
+        numpy.ndarray
+            (Master node only) The gradient of total figure of merit.
+        """
+        foms = []
+        # grads = []
+
+        grads = self._grads
+        for am in self._ams:
+            # grads.append( am.gradient(params) )
+            foms.append( am.calc_fom(am.sim, params) )
+
+        if(NOT_PARALLEL):
+            grad_total = self.calc_total_gradient(foms, grads)
+            return grad_total
+        else:
+            return None
+
+
+    def check_gradient(self, params, indices=[], plot=True, verbose=True,
+                       return_gradients=False, fd_step=1e-10):
+        """Check the gradient of an multi-objective AdjointMethod.
+
+        Parameters
+        ----------
+        params : numpy.ndarray
+            design parameters
+        indices : list or numpy.ndarray
+            list of gradient indices to check. An empty list indicates that the
+            whole gradient should be verified. A subset of indices may be
+            desirable for large problems.  (default = [])
+
+        Returns
+        -------
+        float
+            Relative error in gradient.
+        """
+        # we override this function so we can initially update all of the ams
+        # as desired
+        self.sim = self._ams[0].sim
+        for am in self._ams:
+            am.update_system(params)
+            am.sim.update()
+
+        return super(AdjointMethodMO, self).check_gradient(params, indices, plot,
+                                                           verbose,
+                                                           return_gradients,
+                                                           fd_step)
 
 class AdjointMethodMO(with_metaclass(ABCMeta, AdjointMethod)):
     """An AdjointMethod object for an ensemble of different figures of merit
@@ -1018,8 +1640,6 @@ class AdjointMethodFM2D(AdjointMethod):
 
         gradient = np.zeros(lenp)
         for i in range(lenp):
-            #if(NOT_PARALLEL):
-            #    print i
             p0 = params[i]
             ub = update_boxes[i]
 

@@ -6,7 +6,7 @@ import numpy as np
 from numpy.ctypeslib import ndpointer
 
 __author__ = "Andrew Michaels"
-__license__ = "BSD-3"
+__license__ = "GPL License, Version 3.0"
 __version__ = "2019.5.6"
 __maintainer__ = "Andrew Michaels"
 __status__ = "development"
@@ -145,6 +145,10 @@ libGrid.Material3D_get_values.argtypes = [c_void_p, c_complex_1D_p, c_int, c_int
                                           c_int, c_int, c_double, c_double,
                                           c_double]
 libGrid.Material3D_get_values.restype = None
+libGrid.Material3D_set_mu.argtypes = [c_void_p, c_complex_1D_p, c_int, c_int, c_int, c_int,
+                                          c_int, c_int, c_double, c_double,
+                                          c_double]
+libGrid.Material3D_set_mu.restype = None
 
 ####################################################################################
 # ConstantMaterial3D configuration
@@ -169,6 +173,8 @@ libGrid.StructuredMaterial3D_delete.restype = None
 libGrid.StructuredMaterial3D_add_primitive.argtypes = [c_void_p, c_void_p,
                                                        c_double, c_double]
 libGrid.StructuredMaterial3D_add_primitive.restype = None
+libGrid.StructuredMaterial3D_set_Nsubcell.argtypes = [c_void_p, c_int]
+libGrid.StructuredMaterial3D_set_Nsubcell.restype = None
 
 ####################################################################################
 # Misc

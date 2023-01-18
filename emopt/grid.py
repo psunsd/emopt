@@ -33,7 +33,7 @@ from .misc import DomainCoordinates
 from .misc import warning_message
 
 __author__ = "Andrew Michaels"
-__license__ = "BSD-3"
+__license__ = "GPL License, Version 3.0"
 __version__ = "2019.5.6"
 __maintainer__ = "Andrew Michaels"
 __status__ = "development"
@@ -806,6 +806,53 @@ class Material3D(object):
 
         return arr
 
+    def set_mu(self, k1, k2, j1, j2, i1, i2, sx=0, sy=0, sz=0, arr=None,
+                   reshape=True):
+        """Get the values of the material distribution within a set of array
+        indicesa set of array indices.
+
+        Parameters
+        ----------
+        k1 : int
+            The lower integer bound on x of the desired region
+        k2 : int
+            The upper integer bound on x of the desired region
+        j1 : int
+            The lower integer bound on y of the desired region
+        j2 : int
+            The upper integer bound on y of the desired region
+        i1 : int
+            The lower integer bound on y of the desired region
+        i2 : int
+            The upper integer bound on y of the desired region
+        arr : numpy.ndarray (optional)
+            The array with dimension (m2-m1)x(n2-n1) with type np.complex128
+            which will store the retrieved material distribution. If None, a
+            new array will be created. (optional = None)
+
+        Returns
+        -------
+        numpy.ndarray
+            The retrieved complex material distribution.
+        """
+        Nx = k2-k1
+        Ny = j2-j1
+        Nz = i2-i1
+
+        if(type(arr) == type(None)):
+            arr = np.zeros(Nx*Ny*Nz, dtype=np.complex128)
+        else:
+            arr = np.ravel(arr)
+
+        libGrid.Material3D_set_mu(self._object, arr, k1, k2, j1, j2, i1,
+                                      i2, sx, sy, sz)
+
+        # This might result in an expensive copy operation, unfortunately
+        if(reshape):
+            arr = np.reshape(arr, [Nz, Ny, Nx])
+
+        return arr
+
     def get_values_in(self, domain, sx=0, sy=0, sz=0, arr=None, squeeze=False):
         """Get the values of the material distribution within a domain.
 
@@ -902,8 +949,9 @@ class StructuredMaterial3D(Material3D):
     primitives : list
         The list of primitives used to define the material distribution.
     """
-    def __init__(self, X, Y, Z, dx, dy, dz):
+    def __init__(self, X, Y, Z, dx, dy, dz, Nsubcell=128):
         self._object = libGrid.StructuredMaterial3D_new(X, Y, Z, dx, dy, dz)
+        libGrid.StructuredMaterial3D_set_Nsubcell(self._object, Nsubcell)
         self._primitives = []
         self._zmins = []
         self._zmaxs = []

@@ -1,6 +1,7 @@
 #include <iostream>
 #include <memory>
 #include <vector>
+#include <complex>
 
 #ifndef __FDTD_HPP__
 #define __FDTD_HPP__
@@ -78,6 +79,36 @@ typedef struct struct_complex128 {
     }
 
 } complex128;
+
+typedef struct kernelparams {
+    double t;
+    int i0, j0, k0, I, J, K, Nx, Ny, Nz;
+    int pml_xmin, pml_xmax, pml_ymin, pml_ymax, pml_zmin, pml_zmax;
+    int w_pml_x0, w_pml_x1, w_pml_y0, w_pml_y1, w_pml_z0, w_pml_z1;
+    size_t size;
+    char *bc;
+    double odx, dt, src_t;
+    int *i0s, *j0s, *k0s, *Is, *Js, *Ks, srclen;
+    double src_T, src_min, src_k;
+
+    // pointers to fields, source, pml
+    double *Ex, *Ey, *Ez, *Hx, *Hy, *Hz;
+    complex128 *epsx, *epsy, *epsz;
+
+    complex128 *Jx, *Jy, *Jz, *Mx, *My, *Mz;
+
+    double *pml_Exy0, *pml_Exy1, *pml_Exz0, *pml_Exz1,
+           *pml_Eyx0, *pml_Eyx1, *pml_Eyz0, *pml_Eyz1,
+           *pml_Ezx0, *pml_Ezx1, *pml_Ezy0, *pml_Ezy1,
+           *pml_Hxy0, *pml_Hxy1, *pml_Hxz0, *pml_Hxz1,
+           *pml_Hyx0, *pml_Hyx1, *pml_Hyz0, *pml_Hyz1,
+           *pml_Hzx0, *pml_Hzx1, *pml_Hzy0, *pml_Hzy1;
+    double *kappa_H_x, *kappa_H_y, *kappa_H_z,
+           *kappa_E_x, *kappa_E_y, *kappa_E_z,
+           *bHx, *bHy, *bHz, *bEx, *bEy, *bEz,
+           *cHx, *cHy, *cHz, *cEx, *cEy, *cEz;
+
+} kernelpar;
 
 namespace fdtd {
 
@@ -169,6 +200,9 @@ namespace fdtd {
             // size and location of local chunk in grid
             int _I, _J, _K, _i0, _j0, _k0;
 
+            // Z-index of the perturbed domain
+            int _i1, _i2;
+
             // physical simulation size and Yee cell size in x,y,z
             double _X, _Y, _Z, _dx, _dy, _dz;
 
@@ -181,9 +215,13 @@ namespace fdtd {
             // source time parameters
             double _src_T, _src_min, _src_k, _src_n0;
 
-            // Field and source arrays
+            // Field arrays
             double  *_Ex, *_Ey, *_Ez,
                     *_Hx, *_Hy, *_Hz;
+
+            // Field arrays on GPU
+            double *dEx, *dEy, *dEz,
+                   *dHx, *dHy, *dHz;
 
             bool _complex_eps;
 
@@ -197,6 +235,18 @@ namespace fdtd {
                        *_Ex_t1, *_Ey_t1, *_Ez_t1,
                        *_Hx_t1, *_Hy_t1, *_Hz_t1;
 
+            // eps arrays on GPU
+            complex128 *depsx, *depsy, *depsz;
+
+            // source dimensions
+            int *_i0s, *_j0s, *_k0s, *_Is, *_Js, *_Ks, _srclen;
+
+            // source dimension arrays on GPU
+            int *di0s, *dj0s, *dk0s, *dIs, *dJs, *dKs;
+
+            // source arrays on GPU
+            complex128 *dJx, *dJy, *dJz, *dMx, *dMy, *dMz;
+
             // PML parameters
             int _w_pml_x0, _w_pml_x1,
                 _w_pml_y0, _w_pml_y1,
@@ -205,9 +255,10 @@ namespace fdtd {
             double _sigma, _alpha, _kappa, _pow;
 
             char _bc[3];
+            char *dbc;
 
             // PML arrays -- because convolutions
-            // Not ever processor will need all of different PML layers.
+            // Not every processor will need all of different PML layers.
             // For example, a processor which touches the xmin boundary of the
             // simulation only needs to store pml values corresponding to derivatives
             // along the x direction.
@@ -218,7 +269,16 @@ namespace fdtd {
                    *_pml_Hyx0, *_pml_Hyx1, *_pml_Hyz0, *_pml_Hyz1,
                    *_pml_Hzx0, *_pml_Hzx1, *_pml_Hzy0, *_pml_Hzy1;
 
+            // PML arrays on GPU
+            double *dpml_Exy0, *dpml_Exy1, *dpml_Exz0, *dpml_Exz1,
+                   *dpml_Eyx0, *dpml_Eyx1, *dpml_Eyz0, *dpml_Eyz1,
+                   *dpml_Ezx0, *dpml_Ezx1, *dpml_Ezy0, *dpml_Ezy1,
+                   *dpml_Hxy0, *dpml_Hxy1, *dpml_Hxz0, *dpml_Hxz1,
+                   *dpml_Hyx0, *dpml_Hyx1, *dpml_Hyz0, *dpml_Hyz1,
+                   *dpml_Hzx0, *dpml_Hzx1, *dpml_Hzy0, *dpml_Hzy1;
+
             // precomputed pml parameters. These values are precomputed to speed things up
+            // used in fdtd::FDTD::compute_pml_params()
             double *_kappa_H_x, *_kappa_H_y, *_kappa_H_z, 
                    *_kappa_E_x, *_kappa_E_y, *_kappa_E_z,
                    *_bHx, *_bHy, *_bHz,
@@ -226,7 +286,21 @@ namespace fdtd {
                    *_cHx, *_cHy, *_cHz,
                    *_cEx, *_cEy, *_cEz;
 
+            // PML parameters on GPU
+            double *dkappa_H_x, *dkappa_H_y, *dkappa_H_z,
+                   *dkappa_E_x, *dkappa_E_y, *dkappa_E_z,
+                   *dbHx, *dbHy, *dbHz,
+                   *dbEx, *dbEy, *dbEz,
+                   *dcHx, *dcHy, *dcHz,
+                   *dcEx, *dcEy, *dcEz;
+
             std::vector<SourceArray> _sources;
+
+            // source indices and arrays on GPU
+            //int di0s, dj0s, dk0s, dIs, dJs, dKs;
+
+            // pointers to the parameter structs on the device and the host
+            kernelpar *_kpar_device, *_kpar_host;
 
             /*!
              * Calculate the pml ramp function (which defines how the
@@ -305,6 +379,9 @@ namespace fdtd {
              */
             void set_local_grid(int k0, int j0, int i0, int K, int J, int I);
 
+            // set Z-index of the perturbed box domain: i1-lower Z, i2-upper Z
+            void set_local_grid_perturb(int i1, int i2);
+
             /*!
              * Set the wavelength of the simulation.
              *
@@ -353,6 +430,19 @@ namespace fdtd {
             void set_field_arrays(double *Ex, double *Ey, double *Ez,
                                   double *Hx, double *Hy, double *Hz);
 
+            void block_CUDA_free();
+            void block_CUDA_src_free();
+            void block_CUDA_malloc_memcpy();
+            void block_CUDA_src_malloc_memcpy();
+            void copyCUDA_field_arrays();
+
+            void calc_ydAx(size_t size, size_t Nx, size_t Ny, size_t Nz, size_t i0, size_t i1, size_t i2,
+                std::complex<double> *ydAx,
+                std::complex<double> *Ex_adj, std::complex<double> *Ey_adj, std::complex<double> *Ez_adj,
+                std::complex<double> *Ex_fwd, std::complex<double> *Ey_fwd, std::complex<double> *Ez_fwd,
+                std::complex<double> *epsx0, std::complex<double> *epsy0, std::complex<double> *epsz0,
+                std::complex<double> *epsxp, std::complex<double> *epsyp, std::complex<double> *epszp);
+
             /*!
              * Set the material arrays which store complex permittivity and permeability
              * distributions.
@@ -370,8 +460,7 @@ namespace fdtd {
              * \param mu_y - The preallocated vector for the 22 element of the permeability tensor.
              * \param mu_z - The preallocated vector for the 33 element of the permeability tensor.
              */
-            void set_mat_arrays(complex128 *eps_x, complex128 *eps_y, complex128 *eps_z,
-                                complex128 *mu_x, complex128 *mu_y, complex128 *mu_z);
+            void set_mat_arrays(complex128 *eps_x, complex128 *eps_y, complex128 *eps_z);
 
             /*!
              * Set a flag that indicates whether or not the permittivity is pure real
@@ -454,6 +543,10 @@ namespace fdtd {
              */
             void set_t1_arrays(complex128 *Ex_t1, complex128 *Ey_t1, complex128 *Ez_t1,
                                complex128 *Hx_t1, complex128 *Hy_t1, complex128 *Hz_t1);
+
+            void capture_pbox_fields(std::complex<double> *Ex_full,std::complex<double> *Ey_full,
+                                    std::complex<double> *Ez_full, std::complex<double> *Ex_pbox,
+                                    std::complex<double> *Ey_pbox, std::complex<double> *Ez_pbox);
 
             /*!
              * Record the field at the current time in the t0 arrays.
@@ -580,15 +673,27 @@ extern "C" {
         void FDTD_set_local_grid(fdtd::FDTD* fdtd, 
                                  int k0, int j0, int i0,
                                  int K, int J, int I);
+        void FDTD_set_local_grid_perturb(fdtd::FDTD* fdtd,
+                                 int i1, int i2);
         void FDTD_set_dt(fdtd::FDTD* fdtd, double dt);
         void FDTD_set_complex_eps(fdtd::FDTD* fdtd, bool complex_eps);
+        void FDTD_block_CUDA_free(fdtd::FDTD* fdtd);
+        void FDTD_block_CUDA_src_free(fdtd::FDTD* fdtd);
+        void FDTD_block_CUDA_malloc_memcpy(fdtd::FDTD* fdtd);
+        void FDTD_block_CUDA_src_malloc_memcpy(fdtd::FDTD* fdtd);
+        void FDTD_copyCUDA_field_arrays(fdtd::FDTD* fdtd);
+        void FDTD_calc_ydAx(fdtd::FDTD* fdtd, size_t size, size_t Nx, size_t Ny, size_t Nz, size_t i0, size_t i1, size_t i2,
+                std::complex<double> *ydAx,
+                std::complex<double> *Ex_adj, std::complex<double> *Ey_adj, std::complex<double> *Ez_adj,
+                std::complex<double> *Ex_fwd, std::complex<double> *Ey_fwd, std::complex<double> *Ez_fwd,
+                std::complex<double> *epsx0, std::complex<double> *epsy0, std::complex<double> *epsz0,
+                std::complex<double> *epsxp, std::complex<double> *epsyp, std::complex<double> *epszp);
         void FDTD_set_field_arrays(fdtd::FDTD* fdtd,
                                    double *Ex, double *Ey, double *Ez,
                                    double *Hx, double *Hy, double *Hz);
 
         void FDTD_set_mat_arrays(fdtd::FDTD* fdtd,
-                                 complex128 *eps_x, complex128 *eps_y, complex128 *eps_z,
-                                 complex128 *mu_x, complex128 *mu_y, complex128 *mu_z);
+                                 complex128 *eps_x, complex128 *eps_y, complex128 *eps_z);
 
         void FDTD_update_H(fdtd::FDTD* fdtd, int n, double t);
         void FDTD_update_E(fdtd::FDTD* fdtd, int n, double t);
@@ -616,6 +721,9 @@ extern "C" {
         double FDTD_calc_phase_3T(double t0, double t1, double t2, double f0, double f1, double f2);
         double FDTD_calc_amplitude_3T(double t0, double t1, double t2, double f0, double f1, double f2, double phase);
 
+        void FDTD_capture_pbox_fields(fdtd::FDTD* fdtd, std::complex<double> *Ex_full, std::complex<double> *Ey_full,
+                                    std::complex<double> *Ez_full, std::complex<double> *Ex_pbox,
+                                    std::complex<double> *Ey_pbox, std::complex<double> *Ez_pbox);
         void FDTD_capture_t0_fields(fdtd::FDTD* fdtd);
         void FDTD_capture_t1_fields(fdtd::FDTD* fdtd);
         void FDTD_calc_complex_fields_2T(fdtd::FDTD* fdtd, double t0, double t1);

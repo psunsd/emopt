@@ -173,7 +173,7 @@ def install_petsc(install_dir):
     call(["./configure", "--with-scalar-type=complex", "--with-mpi=1",
           "--COPTFLAGS='-O3'", "--FOPTFLAGS='-O3'", "--CXXOPTFLAGS='-O3'",  
           "--with-debugging=0", "--prefix="+install_dir, "--download-scalapack", 
-          "--download-mumps", "--download-openblas"])
+          "--download-mumps", "--download-fblaslapack=1"])
     call(['make', 'all', 'test'])
 
     print_message('Installing PETSc...')

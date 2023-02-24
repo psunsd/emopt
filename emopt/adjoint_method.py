@@ -155,7 +155,7 @@ from builtins import object
 from . import fdfd
 from . import fdtd
 from .misc import info_message, warning_message, error_message, RANK, \
-NOT_PARALLEL, run_on_master, N_PROC, COMM
+NOT_PARALLEL, run_on_master, N_PROC, COMM, DomainCoordinates
 from . import fomutils
 
 import numpy as np
@@ -167,6 +167,15 @@ from future.utils import with_metaclass
 from timeit import default_timer as timer
 from datetime import datetime
 import gc
+
+import torch
+torch.set_default_dtype(torch.double)
+torch.set_default_tensor_type(torch.DoubleTensor)
+
+import ctypes
+import ctypes.util
+libc = ctypes.CDLL(ctypes.util.find_library('c'))
+
 __author__ = "Andrew Michaels"
 __license__ = "GPL License, Version 3.0"
 __version__ = "2019.5.6"
@@ -243,6 +252,7 @@ class AdjointMethod(with_metaclass(ABCMeta, object)):
         self.sim = sim
         self.prev_params = []
         self._step = step
+        self._UseAutoDiff = False
 
     @property
     def step(self):
@@ -374,6 +384,10 @@ class AdjointMethod(with_metaclass(ABCMeta, object)):
         numpy.ndarray
             The partial derivatives with respect to the design variables.
         """
+        pass
+
+    @abstractmethod
+    def calc_gradient_manual(self, sim, params):
         pass
 
     def get_update_boxes(self, sim, params):

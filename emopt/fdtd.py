@@ -894,7 +894,25 @@ class FDTD(MaxwellSolver):
         if(bbox == None):
             verbose = self.verbose
             self.verbose = 0
-            self.build()
+            # self.build()
+            if hasattr(self,'_eps_x_p')==False: self._eps_x_p=self._da.createGlobalVec()
+            if hasattr(self,'_eps_y_p')==False: self._eps_y_p=self._da.createGlobalVec()
+            if hasattr(self,'_eps_z_p')==False: self._eps_z_p=self._da.createGlobalVec()
+            eps = self._eps
+            mu = self._mu
+            pos, lens = self._da.getCorners()
+            k0, j0, i0 = pos
+            K, J, I = lens
+            eps.get_values(k0, k0 + K, j0, j0 + J, i0, i0 + I,
+                           sx=0.5, sy=0.0, sz=-0.5,
+                           arr=self._eps_x_p.getArray())
+            eps.get_values(k0, k0 + K, j0, j0 + J, i0, i0 + I,
+                           sx=0.0, sy=0.5, sz=-0.5,
+                           arr=self._eps_y_p.getArray())
+            eps.get_values(k0, k0 + K, j0, j0 + J, i0, i0 + I,
+                           sx=0.0, sy=0.0, sz=0.0,
+                           arr=self._eps_z_p.getArray())
+
             self.verbose = verbose
 
         else:
@@ -1386,16 +1404,6 @@ class FDTD(MaxwellSolver):
 
         # update count (for diagnostics)
         self.forward_count += 1
-
-        # # free T1 fields
-        # self._Ex_fwd_t1.destroy()
-        # self._Ey_fwd_t1.destroy()
-        # self._Ez_fwd_t1.destroy()
-        # self._Hx_fwd_t1.destroy()
-        # self._Hy_fwd_t1.destroy()
-        # self._Hz_fwd_t1.destroy()
-        # del self._Ex_fwd_t1; del self._Ey_fwd_t1; del self._Ez_fwd_t1
-        # del self._Hx_fwd_t1; del self._Hy_fwd_t1; del self._Hz_fwd_t1
 
     def solve_adjoint(self):
         """Run an adjoint simulation.

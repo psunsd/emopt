@@ -1527,6 +1527,8 @@ class AdjointMethodMO(with_metaclass(ABCMeta, AdjointMethod)):
         else:
             return None
 
+    def calc_gradient_manual(self, sim, params):
+        pass
 
     def check_gradient(self, params, indices=[], plot=True, verbose=True,
                        return_gradients=False, fd_step=1e-10):

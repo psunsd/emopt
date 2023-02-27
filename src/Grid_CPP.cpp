@@ -885,49 +885,6 @@ void StructuredMaterial3D::get_values(ArrayXcd& grid, int k1, int k2,
     _kpar_host->PrimLen = PrimLen; _kpar_host->LayerLen = LayerLen;
     _kpar_host->background = _background;
 
-/*
-    std::ofstream pf;
-    pf.clear();
-    pf.open("psgcdata.dat");
-    if(pf.fail()){ std::cerr << "open data file failure:" << strerror(errno) << "\n";}
-    pf << i1 << std::endl;
-    pf << i2 << std::endl;
-    pf << j1 << std::endl;
-    pf << j2 << std::endl;
-    pf << k1 << std::endl;
-    pf << k2 << std::endl;
-    pf << Nx << std::endl;
-    pf << Ny << std::endl;
-    pf << Nz << std::endl;
-    pf << std::fixed << std::setprecision(std::numeric_limits<double>::digits10+1) << _dx << std::endl;
-    pf << std::fixed << std::setprecision(std::numeric_limits<double>::digits10+1) << _dy << std::endl;
-    pf << std::fixed << std::setprecision(std::numeric_limits<double>::digits10+1) << _dz << std::endl;
-    pf << std::fixed << std::setprecision(std::numeric_limits<double>::digits10+1) << sx << std::endl;
-    pf << std::fixed << std::setprecision(std::numeric_limits<double>::digits10+1) << sy << std::endl;
-    pf << std::fixed << std::setprecision(std::numeric_limits<double>::digits10+1) << sz << std::endl;
-    pf << std::fixed << std::setprecision(std::numeric_limits<double>::digits10+1) << _background << std::endl;
-    pf << size << std::endl;
-    pf << PrimLen << std::endl;
-    pf << LayerLen << std::endl;
-    for(int i=0; i<LayerLen+1; i++){ pf << std::fixed << std::setprecision(std::numeric_limits<double>::digits10+1) << ZList[i] << std::endl; }
-    for(int i=0; i<LayerLen; i++){ pf << PrimNumberPerLayer[i] << std::endl; }
-    for(int i=0; i<LayerLen; i++){ pf << PrimIdxPerLayer[i] << std::endl; }
-    for(int i=0; i<PrimLen; i++){ pf << PrimVertNumber[i] << std::endl; }
-    for(int i=0; i<PrimLen; i++){ pf << PrimVertCoordLoc[i] << std::endl; }
-    for(int i=0; i<PrimLen; i++){ pf << PrimLayerSeq[i] << std::endl; }
-    for(int i=0; i<PrimLen; i++){ pf << PrimSeqWithinLayer[i] << std::endl; }
-    for(int i=0; i<PrimLen; i++){ pf << PrimLayerValue[i] << std::endl; }
-    for(int i=0; i<PrimLen; i++){ pf << std::fixed << std::setprecision(std::numeric_limits<double>::digits10+1) << PrimMatValue[i] << std::endl; }
-    for(int i=0; i<PrimLen; i++){ pf << std::fixed << std::setprecision(std::numeric_limits<double>::digits10+1) << PrimVertXmin[i] << std::endl; }
-    for(int i=0; i<PrimLen; i++){ pf << std::fixed << std::setprecision(std::numeric_limits<double>::digits10+1) << PrimVertXmax[i] << std::endl; }
-    for(int i=0; i<PrimLen; i++){ pf << std::fixed << std::setprecision(std::numeric_limits<double>::digits10+1) << PrimVertYmin[i] << std::endl; }
-    for(int i=0; i<PrimLen; i++){ pf << std::fixed << std::setprecision(std::numeric_limits<double>::digits10+1) << PrimVertYmax[i] << std::endl; }
-    for(int i=0; i<VerticesLen; i++){ pf << std::fixed << std::setprecision(std::numeric_limits<double>::digits10+1) << PrimVertXAll[i] << std::endl; }
-    for(int i=0; i<VerticesLen; i++){ pf << std::fixed << std::setprecision(std::numeric_limits<double>::digits10+1) << PrimVertYAll[i] << std::endl; }
-
-    pf.close();
-*/
-
     double *dZList, *dPrimVertXAll, *dPrimVertYAll, *dPrimVertXmin, *dPrimVertXmax, *dPrimVertYmin, *dPrimVertYmax;
     int *dPrimNumberPerLayer, *dPrimIdxPerLayer, *dPrimVertNumber, *dPrimVertCoordLoc, *dPrimLayerSeq, *dPrimSeqWithinLayer, *dPrimLayerValue;
     thrust::complex<double> *dPrimMatValue, *dgrid;

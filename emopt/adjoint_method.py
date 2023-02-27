@@ -503,85 +503,151 @@ class AdjointMethod(with_metaclass(ABCMeta, object)):
         """
         # get the current diagonal elements of A.
         # only these elements change when the design variables change.
+
         del self.sim._Ex; del self.sim._Ey; del self.sim._Ez
         del self.sim._Hx; del self.sim._Hy; del self.sim._Hz
         gc.collect()
 
-        sim._eps_x_p = sim._da.createGlobalVec()
-        sim._eps_y_p = sim._da.createGlobalVec()
-        sim._eps_z_p = sim._da.createGlobalVec()
-        pos,lens = sim._da.getCorners()
-        k0,j0,i0 = pos
-        K,J,I = lens
-        sim._eps.get_values(k0,k0+K,j0,j0+J,i0,i0+I,
-                            sx=0.5, sy=0.0, sz=-0.5,
-                            arr=sim._eps_x_p.getArray())
-        sim._eps.get_values(k0,k0+K,j0,j0+J,i0,i0+I,
-                            sx=0.0, sy=0.5, sz=-0.5,
-                            arr=sim._eps_y_p.getArray())
-        sim._eps.get_values(k0,k0+K,j0,j0+J,i0,i0+I,
-                            sx=0.0, sy=0.0, sz=0.0,
-                            arr=sim._eps_z_p.getArray())
+        if self._UseAutoDiff is True:
+            ksigz = self.ksigz
+            paramdiff = torch.zeros(len(params))
+            for ii in range(len(params)):
+                paramdiff[ii] = params[ii]
 
-        Ai = sim.get_A_diag()
+            update_boxes = self.get_update_boxes(sim, params)
+            ub = update_boxes[0]
+            bbox = DomainCoordinates(ub[0], ub[1], ub[2], ub[3], ub[4], ub[5], self.sim._dx, self.sim._dy, self.sim._dz)
+            g_inds, l_inds, d_inds, sizes = self.sim._FDTD__get_local_domain_overlap(bbox)
+            # lower/upper surfaces of the etching
+            zmin, zmax = self.sim.perturb_zmin, self.sim.perturb_zmax
+            gradient = np.zeros(len(params))
 
-        step = self._step
-        update_boxes = self.get_update_boxes(sim, params)
-        lenp = len(params)
+            # Ex
+            print("Calc Ex gradient:"+datetime.now().isoformat())
+            sx, sy, sz = 0.5*self.sim._dx, 0.0*self.sim._dy, -0.5*self.sim._dz
+            z = torch.linspace(sz+l_inds[0]*self.sim.dz, sz+(l_inds[0]+sizes[0])*self.sim.dz, sizes[0])
+            shape = self.update_system_diffgeo(paramdiff, sx=sx, sy=sy)
+            Z = shape.unsqueeze(-1).expand(-1,-1,z.shape[0])
+            Z = Z * torch.sigmoid(ksigz*(z-zmin))*torch.sigmoid(-ksigz*(z-zmax)).unsqueeze(0).unsqueeze(0).expand(shape.shape[0], shape.shape[1], -1)
+            Z += torch.sigmoid(-ksigz*(z-zmin)).unsqueeze(0).unsqueeze(0).expand(shape.shape[0], shape.shape[1], -1)
+            Z = self.sim.perturb_epsclad + (self.sim.perturb_epscore-self.sim.perturb_epsclad) * Z
+            Zcomp = torch.complex(Z, torch.zeros_like(Z)).permute(2,1,0)
+            fields_tensor = torch.tensor(1j*self.sim._Ex_fwd_t0_pbox[...]*self.sim._Ex_adj_t0_pbox[...])
+            loss_grad = torch.dot(torch.flatten(fields_tensor), torch.flatten(Zcomp))
+            Z_grad = torch.autograd.grad(loss_grad, paramdiff, allow_unused=True)[0]
+            gradient += -2*np.real(Z_grad.detach().numpy())
 
-        grad_full = None
-        grad_parts = []
-        if(RANK == 0):
-            grad_full = np.zeros(N_PROC, dtype=np.double)
+            # Ey
+            print("Calc Ey gradient:"+datetime.now().isoformat())
+            sx, sy, sz = 0.0*self.sim._dx, 0.5*self.sim._dy, -0.5*self.sim._dz
+            z = torch.linspace(sz+l_inds[0]*self.sim.dz, sz+(l_inds[0]+sizes[0])*self.sim.dz, sizes[0])
+            shape = self.update_system_diffgeo(paramdiff, sx=sx, sy=sy)
+            Z = shape.unsqueeze(-1).expand(-1,-1,z.shape[0])
+            Z = Z * torch.sigmoid(ksigz*(z-zmin))*torch.sigmoid(-ksigz*(z-zmax)).unsqueeze(0).unsqueeze(0).expand(shape.shape[0], shape.shape[1], -1)
+            Z += torch.sigmoid(-ksigz*(z-zmin)).unsqueeze(0).unsqueeze(0).expand(shape.shape[0], shape.shape[1], -1)
+            Z = self.sim.perturb_epsclad + (self.sim.perturb_epscore-self.sim.perturb_epsclad) * Z
+            Zcomp = torch.complex(Z, torch.zeros_like(Z)).permute(2,1,0)
+            fields_tensor = torch.tensor(1j*self.sim._Ey_fwd_t0_pbox[...]*self.sim._Ey_adj_t0_pbox[...])
+            loss_grad = torch.dot(torch.flatten(fields_tensor), torch.flatten(Zcomp))
+            Z_grad = torch.autograd.grad(loss_grad, paramdiff, allow_unused=True)[0]
+            gradient += -2*np.real(Z_grad.detach().numpy())
 
-        gradient = np.zeros(lenp)
-        for i in range(lenp):
-            print("param",i+1,"of",lenp,'\033[1A\r')
-            p0 = params[i]
-            ub = update_boxes[i]
+            # Ey
+            print("Calc Ez gradient:"+datetime.now().isoformat())
+            sx, sy, sz = 0.0*self.sim._dx, 0.0*self.sim._dy, 0.0*self.sim._dz
+            z = torch.linspace(sz+l_inds[0]*self.sim.dz, sz+(l_inds[0]+sizes[0])*self.sim.dz, sizes[0])
+            shape = self.update_system_diffgeo(paramdiff, sx=sx, sy=sy)
+            Z = shape.unsqueeze(-1).expand(-1,-1,z.shape[0])
+            Z = Z * torch.sigmoid(ksigz*(z-zmin))*torch.sigmoid(-ksigz*(z-zmax)).unsqueeze(0).unsqueeze(0).expand(shape.shape[0], shape.shape[1], -1)
+            Z += torch.sigmoid(-ksigz*(z-zmin)).unsqueeze(0).unsqueeze(0).expand(shape.shape[0], shape.shape[1], -1)
+            Z = self.sim.perturb_epsclad + (self.sim.perturb_epscore-self.sim.perturb_epsclad) * Z
+            Zcomp = torch.complex(Z, torch.zeros_like(Z)).permute(2,1,0)
+            fields_tensor = torch.tensor(1j*self.sim._Ez_fwd_t0_pbox[...]*self.sim._Ez_adj_t0_pbox[...])
+            loss_grad = torch.dot(torch.flatten(fields_tensor), torch.flatten(Zcomp))
+            Z_grad = torch.autograd.grad(loss_grad, paramdiff, allow_unused=True)[0]
+            gradient += -2*np.real(Z_grad.detach().numpy())
 
-            # perturb the system
-            params[i] += step
-            self.update_system(params)
-            if(type(ub[0]) == list or type(ub[0]) == np.ndarray or \
-               type(ub[0]) == tuple):
-                for box in ub:
-                    self.sim.perturb(box)
-            else:
-                self.sim.perturb(ub)
-            # calculate dAdp and assemble the full result on the master node
-            product = sim.calc_ydAx(Ai)
-            grad_part = -2*np.real( product/step )
-            grad_parts.append(grad_part)
-
-            # # revert the system to its original state
-            params[i] = p0
-            # self.update_system(params)
-            # if(type(ub[0]) == list or type(ub[0]) == np.ndarray or \
-            #    type(ub[0]) == tuple):
-            #     for box in ub:
-            #         self.sim.update(box)
-            # else:
-            #     self.sim.update(ub)
-
-        COMM.Barrier()
-        for i in range(lenp):
-            # send the partially computed gradient to the master node to finish
-            # up the calculation
-            #COMM.Gather(grad_parts[i], grad_full, root=0)
-            grad_full = COMM.gather(grad_parts[i], root=0)
-
-            # finish calculating the gradient
-            if(NOT_PARALLEL):
-                gradient[i] = np.sum(grad_full)
-
-        sim._eps_x_p.destroy()
-        sim._eps_y_p.destroy()
-        sim._eps_z_p.destroy()
-        del sim._eps_x_p; del sim._eps_y_p; del sim._eps_z_p
-
-        if(NOT_PARALLEL):
             return gradient
+        else:
+            sim._eps_x_p = sim._da.createGlobalVec()
+            sim._eps_y_p = sim._da.createGlobalVec()
+            sim._eps_z_p = sim._da.createGlobalVec()
+            pos,lens = sim._da.getCorners()
+            k0,j0,i0 = pos
+            K,J,I = lens
+            sim._eps.get_values(k0,k0+K,j0,j0+J,i0,i0+I,
+                                sx=0.5, sy=0.0, sz=-0.5,
+                                arr=sim._eps_x_p.getArray())
+            sim._eps.get_values(k0,k0+K,j0,j0+J,i0,i0+I,
+                                sx=0.0, sy=0.5, sz=-0.5,
+                                arr=sim._eps_y_p.getArray())
+            sim._eps.get_values(k0,k0+K,j0,j0+J,i0,i0+I,
+                                sx=0.0, sy=0.0, sz=0.0,
+                                arr=sim._eps_z_p.getArray())
+
+            Ai = sim.get_A_diag()
+
+            step = self._step
+            update_boxes = self.get_update_boxes(sim, params)
+            lenp = len(params)
+
+            grad_full = None
+            grad_parts = []
+            if(RANK == 0):
+                grad_full = np.zeros(N_PROC, dtype=np.double)
+
+            gradient = np.zeros(lenp)
+            for i in range(lenp):
+                print("param",i+1,"of",lenp, datetime.now().isoformat()+'\033[1A\r')
+                p0 = params[i]
+                ub = update_boxes[i]
+
+                # perturb the system
+                params[i] += step
+                self.update_system(params)
+                start = timer()
+                if(type(ub[0]) == list or type(ub[0]) == np.ndarray or \
+                   type(ub[0]) == tuple):
+                    for box in ub:
+                        self.sim.perturb(box)
+                else:
+                    self.sim.perturb(ub)
+                print("perturb:",timer()-start)
+                # calculate dAdp and assemble the full result on the master node
+                start = timer()
+                product = sim.calc_ydAx(Ai)
+                print("FMR:", timer()-start)
+                grad_part = -2*np.real( product/step )
+                grad_parts.append(grad_part)
+
+                # # revert the system to its original state
+                params[i] = p0
+                # self.update_system(params)
+                # if(type(ub[0]) == list or type(ub[0]) == np.ndarray or \
+                #    type(ub[0]) == tuple):
+                #     for box in ub:
+                #         self.sim.update(box)
+                # else:
+                #     self.sim.update(ub)
+
+            COMM.Barrier()
+            for i in range(lenp):
+                # send the partially computed gradient to the master node to finish
+                # up the calculation
+                #COMM.Gather(grad_parts[i], grad_full, root=0)
+                grad_full = COMM.gather(grad_parts[i], root=0)
+
+                # finish calculating the gradient
+                if(NOT_PARALLEL):
+                    gradient[i] = np.sum(grad_full)
+
+            sim._eps_x_p.destroy()
+            sim._eps_y_p.destroy()
+            sim._eps_z_p.destroy()
+            del sim._eps_x_p; del sim._eps_y_p; del sim._eps_z_p
+
+            if(NOT_PARALLEL):
+                return gradient
 
     def gradient(self, params):
         """Manage the calculation of the gradient figure of merit.
@@ -1093,13 +1159,13 @@ class AdjointMethodMORE(with_metaclass(ABCMeta, AdjointMethod)):
             del am.sim._eps_x_p
             del am.sim._eps_y_p
             del am.sim._eps_z_p
-            
+
             am.sim._Ex_fwd_t0_pbox.destroy()
             am.sim._Ey_fwd_t0_pbox.destroy()
             am.sim._Ez_fwd_t0_pbox.destroy()
             am.sim._Ex_adj_t0_pbox.destroy()
             am.sim._Ey_adj_t0_pbox.destroy()
-            am.sim._Ez_adj_t0_pbox.destroy()
+            am.sim._Ez_adj_t0.pbox.destroy()
 
         if(NOT_PARALLEL):
             grad_total = self.calc_total_gradient(foms, gradient)

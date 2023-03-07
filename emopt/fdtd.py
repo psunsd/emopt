@@ -1926,6 +1926,54 @@ class FDTD(MaxwellSolver):
 
         return np.sum(ydAx)*1j
 
+    def export_field(self):
+        K,J,I = self.Nx, self.Ny, self.Nz
+        Zidx = np.linspace(0, K*J-1, K*J)
+        Z_x, Z_y = np.mod(Zidx, K), np.floor(Zidx/K)
+
+        fwdx = self._Ex_fwd_t0
+        self._da.globalToNatural(fwdx, self._vn)
+        scatter, fwdxo = PETSc.Scatter.toZero(self._vn)
+        scatter.scatter(self._vn, fwdxo, False, PETSc.Scatter.Mode.FORWARD)
+        fwdy = self._Ey_fwd_t0
+        self._da.globalToNatural(fwdy, self._vn)
+        scatter, fwdyo = PETSc.Scatter.toZero(self._vn)
+        scatter.scatter(self._vn, fwdyo, False, PETSc.Scatter.Mode.FORWARD)
+        fwdz = self._Ez_fwd_t0
+        self._da.globalToNatural(fwdz, self._vn)
+        scatter, fwdzo = PETSc.Scatter.toZero(self._vn)
+        scatter.scatter(self._vn, fwdzo, False, PETSc.Scatter.Mode.FORWARD)
+        adjx = self._Ex_adj_t0
+        self._da.globalToNatural(adjx, self._vn)
+        scatter, adjxo = PETSc.Scatter.toZero(self._vn)
+        scatter.scatter(self._vn, adjxo, False, PETSc.Scatter.Mode.FORWARD)
+        adjy = self._Ey_adj_t0
+        self._da.globalToNatural(adjy, self._vn)
+        scatter, adjyo = PETSc.Scatter.toZero(self._vn)
+        scatter.scatter(self._vn, adjyo, False, PETSc.Scatter.Mode.FORWARD)
+        adjz = self._Ez_adj_t0
+        self._da.globalToNatural(adjz, self._vn)
+        scatter, adjzo = PETSc.Scatter.toZero(self._vn)
+        scatter.scatter(self._vn, adjzo, False, PETSc.Scatter.Mode.FORWARD)
+        if (NOT_PARALLEL):
+            domain = DomainCoordinates(0, self._X, 0, self._Y, 0, self._Z, self._dx, self._dy, self._dz)
+            fwdxo = np.array(fwdxo, dtype=np.complex128).reshape([self._Nz, self._Ny, self._Nx])[domain.i, domain.j, domain.k]
+            fwdyo = np.array(fwdyo, dtype=np.complex128).reshape([self._Nz, self._Ny, self._Nx])[domain.i, domain.j, domain.k]
+            fwdzo = np.array(fwdzo, dtype=np.complex128).reshape([self._Nz, self._Ny, self._Nx])[domain.i, domain.j, domain.k]
+            adjxo = np.array(adjxo, dtype=np.complex128).reshape([self._Nz, self._Ny, self._Nx])[domain.i, domain.j, domain.k]
+            adjyo = np.array(adjyo, dtype=np.complex128).reshape([self._Nz, self._Ny, self._Nx])[domain.i, domain.j, domain.k]
+            adjzo = np.array(adjzo, dtype=np.complex128).reshape([self._Nz, self._Ny, self._Nx])[domain.i, domain.j, domain.k]
+
+            fieldx = 1j * adjxo * fwdxo
+            fieldy = 1j * adjyo * fwdyo
+            fieldz = 1j * adjzo * fwdzo
+            np.savetxt("Ex_FD.csv", np.transpose([fieldx.flatten()[K*J*50:K*J*51].real, fieldx.flatten()[K*J*50:K*J*51].imag, Z_x, Z_y]),
+                       header="real,imag,x,y", delimiter=",", comments="")
+            np.savetxt("Ey_FD.csv", np.transpose([fieldy.flatten()[K*J*50:K*J*51].real, fieldy.flatten()[K*J*50:K*J*51].imag, Z_x, Z_y]),
+                       header="real,imag,x,y", delimiter=",", comments="")
+            np.savetxt("Ez_FD.csv", np.transpose([fieldz.flatten()[K*J*50:K*J*51].real, fieldz.flatten()[K*J*50:K*J*51].imag, Z_x, Z_y]),
+                       header="real,imag,x,y", delimiter=",", comments="")
+
     def get_pbox_field_fwd(self):
         libFDTD.FDTD_capture_pbox_fields(self._libfdtd, self._Ex_fwd_t0[...], self._Ey_fwd_t0[...], self._Ez_fwd_t0[...],
                                          self._Ex_fwd_t0_pbox[...], self._Ey_fwd_t0_pbox[...], self._Ez_fwd_t0_pbox[...])

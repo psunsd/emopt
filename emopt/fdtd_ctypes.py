@@ -6,9 +6,9 @@ import numpy as np
 from numpy.ctypeslib import ndpointer
 
 __author__ = "Andrew Michaels"
-__license__ = "BSD-3"
-__version__ = "2023.1.16"
-__maintainer__ = "Peng Sun"
+__license__ = "GPL License, Version 3.0"
+__version__ = "2019.5.6"
+__maintainer__ = "Andrew Michaels"
 __status__ = "development"
 
 dir_path = os.path.dirname(os.path.realpath(__file__))
@@ -48,6 +48,27 @@ libFDTD.FDTD_set_local_grid_perturb.restype = None
 
 libFDTD.FDTD_set_dt.argtypes = [c_void_p, c_double]
 libFDTD.FDTD_set_dt.restype = None
+
+libFDTD.FDTD_set_domain_decomposition.argtypes = [c_void_p, c_char_p]
+libFDTD.FDTD_set_domain_decomposition.restype = None
+
+libFDTD.FDTD_set_rtol.argtypes = [c_void_p, c_double]
+libFDTD.FDTD_set_rtol.restype = None
+
+libFDTD.FDTD_set_gpus_count.argtypes = [c_void_p, c_int]
+libFDTD.FDTD_set_gpus_count.restype = None
+
+libFDTD.FDTD_set_Ncycle.argtypes = [c_void_p, c_double]
+libFDTD.FDTD_set_Ncycle.restype = None
+
+libFDTD.FDTD_set_GPUDirect.argtypes = [c_void_p]
+libFDTD.FDTD_set_GPUDirect.restype = None
+
+libFDTD.FDTD_block_CUDA_multigpu_init.argtypes = [c_void_p]
+libFDTD.FDTD_block_CUDA_multigpu_init.restype = None
+
+libFDTD.FDTD_solve.argtypes = [c_void_p]
+libFDTD.FDTD_solve.restype = None
 
 libFDTD.FDTD_set_complex_eps.argtypes = [c_void_p, c_bool]
 libFDTD.FDTD_set_complex_eps.restype = None

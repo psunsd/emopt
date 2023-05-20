@@ -42,12 +42,11 @@ import sys
 from datetime import datetime
 from timeit import default_timer as timer
 import gc
-# import matplotlib.pyplot as pl
 useCUDA=1
 __author__ = "Andrew Michaels"
-__license__ = "BSD-3"
-__version__ = "2023.1.16"
-__maintainer__ = "Peng Sun"
+__license__ = "GPL License, Version 3.0"
+__version__ = "2019.5.6"
+__maintainer__ = "Andrew Michaels"
 __status__ = "development"
 
 class SourceArray(object):
@@ -239,7 +238,7 @@ class FDTD(MaxwellSolver):
 
     def __init__(self, X, Y, Z, dx, dy, dz, wavelength, rtol=1e-6, nconv=None,
                  min_rindex=1.0, complex_eps=False, dist_method='auto', share_eps=False,
-                 geps_x=None, geps_y=None, geps_z=None, pbox=None):
+                 geps_x=None, geps_y=None, geps_z=None, pbox=None, gpus_count=1):
         super(FDTD, self).__init__(3)
 
         if(nconv is None):
@@ -360,6 +359,12 @@ class FDTD(MaxwellSolver):
         # set whether or not materials are complex valued
         libFDTD.FDTD_set_complex_eps(self._libfdtd, complex_eps)
 
+        # set the number of GPUs used for the simulation, which cannot exceed the total number of available GPUS Ngpus
+        libFDTD.FDTD_set_gpus_count(self._libfdtd, gpus_count)
+
+        # detect and set up GPUDirect
+        libFDTD.FDTD_set_GPUDirect(self._libfdtd)
+
         ## Setup default PML properties
         w_pml = 15
         self._w_pml = [w_pml*dx, w_pml*dx, \
@@ -390,6 +395,7 @@ class FDTD(MaxwellSolver):
         Ncycle = Nlambda * np.sqrt(3)
         self._Nlambda = Nlambda # spatial steps per wavelength
         self._Ncycle = Ncycle #  time steps per period of oscillation
+        libFDTD.FDTD_set_Ncycle(self._libfdtd, Ncycle)
 
         self._src_T    = Ncycle * 20.0 * self._dt
         self._src_min  = 1e-4
@@ -398,6 +404,7 @@ class FDTD(MaxwellSolver):
                                            self._src_min)
 
         self._rtol = rtol
+        libFDTD.FDTD_set_rtol(self._libfdtd, self._rtol)
         self.verbose = 2
 
         ## determine the points used to check for convergence on this process
@@ -853,6 +860,14 @@ class FDTD(MaxwellSolver):
         k0, j0, i0 = pos
         K, J, I = lens
 
+        # # baseline eps without offset
+        # eps.get_values(k0,k0+K,j0,j0+J,i0,i0+I,sx=0.0,sy=0.0,sz=0.0,arr=self._eps_x.getArray())
+        # nslice=self._eps_x.getArray().real[K*J*50:K*J*51]
+        # nidx=np.linspace(0,K*J-1,K*J)
+        # nx=np.mod(nidx,K)
+        # ny=np.floor(nidx/K)
+        # np.savetxt("origingeo_circles.csv",np.transpose([nslice,nx,ny]),fmt='%.18e',delimiter=',',header='n,x,y',comments='')
+
         eps.get_values(k0, k0+K, j0, j0+J, i0, i0+I,
                        sx=0.5, sy=0.0, sz=-0.5,
                        arr=self._eps_x.getArray())
@@ -1080,26 +1095,26 @@ class FDTD(MaxwellSolver):
             #               arr=temp)
             # mu_z[li, lj, lk] = temp
 
-    def __solve(self):
+    def __solve_old(self):
         ## Solve Maxwell's equations. This process is identical for the forward
         # and adjoint simulation. The only difference is the specific sources
         # and auxillary arrays used for saving the final frequency-domain
         # fields.
         # setup spatial derivative factors
-        R = self._wavelength/(2*pi)
-        odx = R/self._dx
-        ody = R/self._dy
-        odz = R/self._dz
-        Nx, Ny, Nz = self._Nx, self._Ny, self._Nz
+        # R = self._wavelength/(2*pi)
+        # odx = R/self._dx
+        # ody = R/self._dy
+        # odz = R/self._dz
+        # Nx, Ny, Nz = self._Nx, self._Ny, self._Nz
 
-        COMM.Barrier()
+        # COMM.Barrier()
 
         # define time step
         dt = self._dt
 
-        pos, lens = self._da.getCorners()
-        k0, j0, i0 = pos
-        K, J, I = lens
+        # pos, lens = self._da.getCorners()
+        # k0, j0, i0 = pos
+        # K, J, I = lens
 
         # Reset field values, pmls, etc
         libFDTD.FDTD_reset_pml(self._libfdtd)
@@ -1305,6 +1320,18 @@ class FDTD(MaxwellSolver):
         if useCUDA:
             libFDTD.FDTD_block_CUDA_free(self._libfdtd)
 
+    def __solve(self):
+        # Reset field values, pmls, etc
+        libFDTD.FDTD_reset_pml(self._libfdtd)
+        self._Ex.fill(0); self._Ey.fill(0); self._Ez.fill(0)
+        self._Hx.fill(0); self._Hy.fill(0); self._Hz.fill(0)
+
+        # Run the simulation
+        libFDTD.FDTD_solve(self._libfdtd)
+
+        # free up fields/materials/PML
+        libFDTD.FDTD_block_CUDA_free(self._libfdtd)
+
     def solve_forward(self):
         """Run a forward simulation.
 
@@ -1350,6 +1377,7 @@ class FDTD(MaxwellSolver):
 
         self._Ex_fwd_t1.set(0); self._Ey_fwd_t1.set(0); self._Ez_fwd_t1.set(0)
         self._Hx_fwd_t1.set(0); self._Hy_fwd_t1.set(0); self._Hz_fwd_t1.set(0)
+
         # make sure we are recording forward fields
         libFDTD.FDTD_set_t0_arrays(self._libfdtd,
                                    self._Ex_fwd_t0.getArray(),
@@ -1366,6 +1394,7 @@ class FDTD(MaxwellSolver):
                                    self._Hx_fwd_t1.getArray(),
                                    self._Hy_fwd_t1.getArray(),
                                    self._Hz_fwd_t1.getArray())
+
         # set the forward simulation sources
         libFDTD.FDTD_clear_sources(self._libfdtd)
         for src in self._sources:
@@ -1376,10 +1405,11 @@ class FDTD(MaxwellSolver):
                                     src.I, src.J, src.K,
                                     False)
 
-        if useCUDA:
-            libFDTD.FDTD_block_CUDA_src_malloc_memcpy(self._libfdtd)
+        # libFDTD.FDTD_block_CUDA_src_malloc_memcpy(self._libfdtd)
+        libFDTD.FDTD_block_CUDA_multigpu_init(self._libfdtd)
+
         self.__solve()
-        
+
         # free T1 fields
         self._Ex_fwd_t1.destroy()
         self._Ey_fwd_t1.destroy()
@@ -1481,7 +1511,8 @@ class FDTD(MaxwellSolver):
                                     False)
 
         if useCUDA:
-            libFDTD.FDTD_block_CUDA_src_malloc_memcpy(self._libfdtd)
+            # libFDTD.FDTD_block_CUDA_src_malloc_memcpy(self._libfdtd)
+            libFDTD.FDTD_block_CUDA_multigpu_init(self._libfdtd)
 
         self.__solve()
 
@@ -1925,54 +1956,6 @@ class FDTD(MaxwellSolver):
                              self._eps_x_p[...], self._eps_y_p[...], self._eps_z_p[...])
 
         return np.sum(ydAx)*1j
-
-    def export_field(self):
-        K,J,I = self.Nx, self.Ny, self.Nz
-        Zidx = np.linspace(0, K*J-1, K*J)
-        Z_x, Z_y = np.mod(Zidx, K), np.floor(Zidx/K)
-
-        fwdx = self._Ex_fwd_t0
-        self._da.globalToNatural(fwdx, self._vn)
-        scatter, fwdxo = PETSc.Scatter.toZero(self._vn)
-        scatter.scatter(self._vn, fwdxo, False, PETSc.Scatter.Mode.FORWARD)
-        fwdy = self._Ey_fwd_t0
-        self._da.globalToNatural(fwdy, self._vn)
-        scatter, fwdyo = PETSc.Scatter.toZero(self._vn)
-        scatter.scatter(self._vn, fwdyo, False, PETSc.Scatter.Mode.FORWARD)
-        fwdz = self._Ez_fwd_t0
-        self._da.globalToNatural(fwdz, self._vn)
-        scatter, fwdzo = PETSc.Scatter.toZero(self._vn)
-        scatter.scatter(self._vn, fwdzo, False, PETSc.Scatter.Mode.FORWARD)
-        adjx = self._Ex_adj_t0
-        self._da.globalToNatural(adjx, self._vn)
-        scatter, adjxo = PETSc.Scatter.toZero(self._vn)
-        scatter.scatter(self._vn, adjxo, False, PETSc.Scatter.Mode.FORWARD)
-        adjy = self._Ey_adj_t0
-        self._da.globalToNatural(adjy, self._vn)
-        scatter, adjyo = PETSc.Scatter.toZero(self._vn)
-        scatter.scatter(self._vn, adjyo, False, PETSc.Scatter.Mode.FORWARD)
-        adjz = self._Ez_adj_t0
-        self._da.globalToNatural(adjz, self._vn)
-        scatter, adjzo = PETSc.Scatter.toZero(self._vn)
-        scatter.scatter(self._vn, adjzo, False, PETSc.Scatter.Mode.FORWARD)
-        if (NOT_PARALLEL):
-            domain = DomainCoordinates(0, self._X, 0, self._Y, 0, self._Z, self._dx, self._dy, self._dz)
-            fwdxo = np.array(fwdxo, dtype=np.complex128).reshape([self._Nz, self._Ny, self._Nx])[domain.i, domain.j, domain.k]
-            fwdyo = np.array(fwdyo, dtype=np.complex128).reshape([self._Nz, self._Ny, self._Nx])[domain.i, domain.j, domain.k]
-            fwdzo = np.array(fwdzo, dtype=np.complex128).reshape([self._Nz, self._Ny, self._Nx])[domain.i, domain.j, domain.k]
-            adjxo = np.array(adjxo, dtype=np.complex128).reshape([self._Nz, self._Ny, self._Nx])[domain.i, domain.j, domain.k]
-            adjyo = np.array(adjyo, dtype=np.complex128).reshape([self._Nz, self._Ny, self._Nx])[domain.i, domain.j, domain.k]
-            adjzo = np.array(adjzo, dtype=np.complex128).reshape([self._Nz, self._Ny, self._Nx])[domain.i, domain.j, domain.k]
-
-            fieldx = 1j * adjxo * fwdxo
-            fieldy = 1j * adjyo * fwdyo
-            fieldz = 1j * adjzo * fwdzo
-            np.savetxt("Ex_FD.csv", np.transpose([fieldx.flatten()[K*J*50:K*J*51].real, fieldx.flatten()[K*J*50:K*J*51].imag, Z_x, Z_y]),
-                       header="real,imag,x,y", delimiter=",", comments="")
-            np.savetxt("Ey_FD.csv", np.transpose([fieldy.flatten()[K*J*50:K*J*51].real, fieldy.flatten()[K*J*50:K*J*51].imag, Z_x, Z_y]),
-                       header="real,imag,x,y", delimiter=",", comments="")
-            np.savetxt("Ez_FD.csv", np.transpose([fieldz.flatten()[K*J*50:K*J*51].real, fieldz.flatten()[K*J*50:K*J*51].imag, Z_x, Z_y]),
-                       header="real,imag,x,y", delimiter=",", comments="")
 
     def get_pbox_field_fwd(self):
         libFDTD.FDTD_capture_pbox_fields(self._libfdtd, self._Ex_fwd_t0[...], self._Ey_fwd_t0[...], self._Ez_fwd_t0[...],

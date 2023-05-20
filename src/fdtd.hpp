@@ -1,31 +1,3 @@
-/******************************************************************************
- * Copyright (c) 2023, Andrew Michaels.  All rights reserved.
- * Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in the
- *       documentation and/or other materials provided with the distribution.
- *     * Neither the name of the NVIDIA CORPORATION nor the
- *       names of its contributors may be used to endorse or promote products
- *       derived from this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL NVIDIA CORPORATION BE LIABLE FOR ANY
- * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- ******************************************************************************/
-
 #include <iostream>
 #include <memory>
 #include <vector>
@@ -114,6 +86,7 @@ typedef struct kernelparams {
     int pml_xmin, pml_xmax, pml_ymin, pml_ymax, pml_zmin, pml_zmax;
     int w_pml_x0, w_pml_x1, w_pml_y0, w_pml_y1, w_pml_z0, w_pml_z1;
     size_t size;
+    size_t ghost_size, buffer_size;
     char *bc;
     double odx, dt, src_t;
     int *i0s, *j0s, *k0s, *Is, *Js, *Ks, srclen;
@@ -121,7 +94,10 @@ typedef struct kernelparams {
 
     // pointers to fields, source, pml
     double *Ex, *Ey, *Ez, *Hx, *Hy, *Hz;
+    double *E_ghostleft, *H_ghostleft, *E_bufferleft, *H_bufferleft,
+        *E_ghostright, *H_ghostright, *E_bufferright, *H_bufferright;
     complex128 *epsx, *epsy, *epsz;
+    complex128 *epsx_full, *epsy_full, *epsz_full;
 
     complex128 *Jx, *Jy, *Jz, *Mx, *My, *Mz;
 
@@ -221,6 +197,42 @@ namespace fdtd {
 
     class FDTD {
         private:
+            // list of kpar on device and host
+            std::vector<kernelpar *> _kpar_list;
+            kernelpar** _kpar_list_host;
+
+            // list of launch parameters for bulk and ghost
+            std::vector<dim3> _griddim_list;
+            std::vector<dim3> _griddimghost_list;
+            std::vector<size_t> _ghostsize_list;
+            std::vector<size_t> _buffersize_list;
+            size_t _ghost_size{0};
+            size_t _buffer_size{0};
+
+            // buffer and ghost pointers on devices
+            double *dE_bufferleft, *dE_bufferright, *dH_bufferleft, *dH_bufferright, 
+                *dE_ghostleft, *dE_ghostright, *dH_ghostleft, *dH_ghostright;
+
+            // number of available GPUs
+            int _Ngpus{1};
+
+            // number of used GPUs
+            int _gpus_count{1};
+
+            // domain decomposition method
+            char _domain_decomp{'y'};
+
+            // number of points for convergence checks
+            int _Nconv{6400};
+
+            // FDTD energy shutoff criteria
+            double _rtol{2e-6};
+
+            // Ncycle
+            double _Ncycle{44.0};
+
+            // GPUDirect status
+            int _P2Pworking{0};
 
             // number of Yee cells in X, Y, Z
             int _Nx, _Ny, _Nz;
@@ -264,7 +276,9 @@ namespace fdtd {
                        *_Hx_t1, *_Hy_t1, *_Hz_t1;
 
             // eps arrays on GPU
-            complex128 *depsx, *depsy, *depsz;
+            complex128 *depsx, *depsy, *depsz;        
+            complex128 *depsx_full, *depsy_full, *depsz_full;
+
 
             // source dimensions
             int *_i0s, *_j0s, *_k0s, *_Is, *_Js, *_Ks, _srclen;
@@ -437,6 +451,14 @@ namespace fdtd {
              */
             void set_dt(double dt);
 
+            void set_rtol(double rtol);
+
+            void set_Ncycle(double Ncycle);
+
+            void set_GPUDirect();
+
+            void set_domain_decomposition(char domain_decomp);
+
             /*!
              * Set the field arrays.
              *
@@ -463,6 +485,8 @@ namespace fdtd {
             void block_CUDA_malloc_memcpy();
             void block_CUDA_src_malloc_memcpy();
             void copyCUDA_field_arrays();
+            void set_gpus_count(int gpus_count);
+            void block_CUDA_multigpu_init();
 
             void calc_ydAx(size_t size, size_t Nx, size_t Ny, size_t Nz, size_t i0, size_t i1, size_t i2,
                 std::complex<double> *ydAx,
@@ -503,6 +527,9 @@ namespace fdtd {
              * \param t - The time of the update = n*dt.
              */
             void update_H(int n, double t);
+
+            // solve FDTD 
+            void solve();
 
             /*!
              * Update the electric field at time t using the magnetic field at time t-1/2*dt.
@@ -705,6 +732,13 @@ extern "C" {
                                  int i1, int i2);
         void FDTD_set_dt(fdtd::FDTD* fdtd, double dt);
         void FDTD_set_complex_eps(fdtd::FDTD* fdtd, bool complex_eps);
+        void FDTD_set_rtol(fdtd::FDTD* fdtd, double rtol);
+        void FDTD_set_Ncycle(fdtd::FDTD* fdtd, double Ncycle);
+        void FDTD_set_gpus_count(fdtd::FDTD* fdtd, int gpus_count);
+        void FDTD_set_GPUDirect(fdtd::FDTD* fdtd);
+        void FDTD_set_domain_decomposition(fdtd::FDTD* fdtd, char domain_decomp);
+        void FDTD_block_CUDA_multigpu_init(fdtd::FDTD* fdtd);
+        void FDTD_solve(fdtd::FDTD* fdtd);
         void FDTD_block_CUDA_free(fdtd::FDTD* fdtd);
         void FDTD_block_CUDA_src_free(fdtd::FDTD* fdtd);
         void FDTD_block_CUDA_malloc_memcpy(fdtd::FDTD* fdtd);

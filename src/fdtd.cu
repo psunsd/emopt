@@ -38,6 +38,14 @@
 #include <stdio.h>
 #include <thrust/complex.h>
 
+#include <cuda_runtime.h>
+#include <thread>
+#include <atomic>
+#include <mutex>
+#include <condition_variable>
+#include <fstream>
+#include <signal.h>
+
 #define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__);}
 inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true)
 {
@@ -47,6 +55,168 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
         if (abort) exit(code);
     }
 }
+
+static std::mutex mutex_H, mutex_E, mutex_conv, mutex_conv2, mutex_t1, mutex_t2;
+static std::condition_variable cv_H, cv_E, cv_conv, cv_conv2, cv_t1, cv_t2;
+std::atomic<size_t> counter_H(0), counter_E(0), counter_conv(0), counter_conv2(0), counter_t1(0), counter_t2(0);
+int blockdim = 128;
+
+void Barrier(std::atomic<size_t> &counter, std::mutex &mutex, std::condition_variable &cv, size_t nthreads)
+{
+    std::unique_lock<std::mutex> lock(mutex);
+    if (++counter == nthreads){
+        counter.store(0);
+        cv.notify_all();
+    }
+    else
+        cv.wait(lock, [&] { return counter == 0; });
+}
+
+void signal_callback_handler(int signum)
+{
+    std::cout << "Caught signal " << signum << std::endl;
+    exit(signum);
+}
+
+inline double norm2(double *mat, int len)
+{
+    double sum = 0.0;
+    for(int i=0;i<len;i++)
+    {
+        sum += mat[i]*mat[i];
+    }
+    return sqrt(sum);
+}
+
+inline double norm2(double *mat, double *mat2, int len)
+{
+    double sum = 0.0;
+    for(int i=0;i<len;i++)
+    {
+        sum += (mat[i]-mat2[i])*(mat[i]-mat2[i]);
+    }
+    return sqrt(sum);
+}
+
+inline double calc_phase(double t0, double t1, double t2, double f0, double f1, double f2)
+{
+    double f10=f1-f0, f21=f2-f1;
+    double ret{0.0f};
+    if(f10==0 && f21==0) return 0.0;
+    else{
+        ret = atan2(f10*(sin(t2)-sin(t1))-f21*(sin(t1)-sin(t0)), f21*(cos(t1)-cos(t0))-f10*(cos(t2)-cos(t1)));
+        if(ret!=ret) return M_PI/2;
+        else return ret;
+    } 
+}
+
+inline double calc_amplitude(double t0, double t1, double t2, double f0, double f1, double f2, double phase)
+{
+    double f10=f1-f0, f21=f2-f1;
+    double ret;
+    if(f10==0 && f21==0) return 0.0;
+    else if(f21*f21 >= f10*f10){
+        ret = f21/(cos(phase)*(sin(t2)-sin(t1))+sin(phase)*(cos(t2)-cos(t1)));
+        if(ret!=ret) return 0.0;
+        else return ret;
+    }else{
+        ret = f10/(cos(phase)*(sin(t1)-sin(t0))+sin(phase)*(cos(t1)-cos(t0)));
+        if(ret!=ret) return 0.0;
+        else return ret;
+    }
+}
+
+void prepare_nvlink (int device_id, int gpus_count)
+{
+    gpuErrchk(cudaSetDevice(device_id));
+	bool nvlink_enabled = true;
+	for (int other_device_id=0; other_device_id<gpus_count; other_device_id++)
+	{
+		if (other_device_id != device_id)
+		{
+			int can_access_other_device {};
+			gpuErrchk(cudaDeviceCanAccessPeer (&can_access_other_device, device_id, other_device_id));
+			if (can_access_other_device)
+			{
+				gpuErrchk(cudaDeviceEnablePeerAccess (other_device_id, 0));
+			}
+			else
+			{
+				std::cerr << "Warning in thread " << device_id <<":device" << device_id
+					<< " can't access device " << other_device_id << " memory."
+					<< " Fall back to normal copy through the host." << std::endl;
+				nvlink_enabled = false;
+			}
+		}
+	}
+	for (int tid=0; tid<gpus_count; tid++)
+	{
+		if(tid==device_id)
+		{
+			if (nvlink_enabled)
+				std::cout << "P2P capable on device " << device_id << std::endl;
+		}
+	}
+}
+
+void cudaP2PAssert(int* _P2Pworking)
+{
+    int Ngpus = 2;
+    double *host_data = new double[Ngpus]{2.6, 7.1};
+    double *host_buffer = new double[Ngpus]{-1.0, -1.0};
+    std::vector<std::thread> threads_list;
+    threads_list.reserve(Ngpus);
+    double** d_sender_list = new double*[Ngpus];
+    double** d_receiver_list = new double*[Ngpus];
+    double *d_sender, *d_receiver;
+    for(int device_id=0; device_id<Ngpus; device_id++){
+        gpuErrchk(cudaSetDevice(device_id));
+        gpuErrchk(cudaMalloc((void **)&d_sender, sizeof(double)));
+        gpuErrchk(cudaMalloc((void **)&d_receiver, sizeof(double)));
+        gpuErrchk(cudaMemcpy(d_sender, host_data+device_id, sizeof(double), cudaMemcpyHostToDevice));
+        d_sender_list[device_id] = d_sender;
+        d_receiver_list[device_id] = d_receiver;
+    }    
+    for(int device_id=0; device_id<Ngpus; device_id++){
+        threads_list.emplace_back([=](){
+            gpuErrchk(cudaSetDevice(device_id));
+            if(device_id==0) {gpuErrchk(cudaMemcpyPeer(d_receiver_list[device_id], device_id, d_sender_list[device_id+1], device_id+1, sizeof(double)));}
+            else {gpuErrchk(cudaMemcpyPeer(d_receiver_list[device_id], device_id, d_sender_list[device_id-1], device_id-1, sizeof(double)));}
+        });
+    }
+    for(auto &thread: threads_list)
+        thread.join();
+    if(host_buffer[0]==host_data[1] && host_buffer[1]==host_data[0])
+        *_P2Pworking = 1;
+    else
+        *_P2Pworking = 0; 
+}
+
+template <typename T>
+__global__ void init_mat(T *mat, size_t len, T val)
+{
+    size_t ind_global = blockIdx.x * blockDim.x + threadIdx.x;
+    if (ind_global >= len) return; 
+    mat[ind_global] = val;
+}
+
+__global__ void kernel_copy_eps(kernelpar *kpar)
+{
+//     1D grid of 1D blocks
+    size_t ind_global = blockIdx.x * blockDim.x + threadIdx.x;
+    if (ind_global >= kpar->I*kpar->J*kpar->K) return;
+
+    int i, j, k;
+    i = ind_global/(kpar->J*kpar->K);
+    j = (ind_global%(kpar->J*kpar->K))/kpar->K;
+    k = (ind_global%(kpar->J*kpar->K))%kpar->K;
+
+    kpar->epsx[ind_global] = kpar->epsx_full[(i+kpar->i0)*kpar->Ny*kpar->Nx + (j+kpar->j0)*kpar->Nx + k + kpar->k0];
+    kpar->epsy[ind_global] = kpar->epsy_full[(i+kpar->i0)*kpar->Ny*kpar->Nx + (j+kpar->j0)*kpar->Nx + k + kpar->k0];
+    kpar->epsz[ind_global] = kpar->epsz_full[(i+kpar->i0)*kpar->Ny*kpar->Nx + (j+kpar->j0)*kpar->Nx + k + kpar->k0];
+}
+
+
 __global__ void kernel_update_H(kernelpar *kpar)
 {
 //     1D grid of 1D blocks
@@ -403,6 +573,1008 @@ __global__ void kernel_update_E(kernelpar *kpar)
     }
 }
 
+__global__ void kernel_update_H_bulk(kernelpar *kpar)
+{
+//     1D grid of 1D blocks
+   size_t ind_global = blockIdx.x * blockDim.x + threadIdx.x;
+//     1D grid of 2D blocks
+//     size_t ind_global = blockIdx.x * blockDim.x * blockDim.y + threadIdx.y * blockDim.x + threadIdx.x;
+//     2D grid of 1D blocks
+//     size_t ind_global = (gridDim.x * blockIdx.y + blockIdx.x) * blockDim.x + threadIdx.x;
+
+    // int i,j,k;
+    // k = blockIdx.x * blockDim.x + threadIdx.x + kpar->k0;
+    // j = blockIdx.y * blockDim.y + threadIdx.y + kpar->j0;
+    // i = blockIdx.z + kpar->i0;
+    // single GPU version
+    // size_t ind_global = (i-kpar->i0) * kpar->Nx * kpar->Ny + (j-kpar->j0) * kpar->Nx + (k-kpar->k0);
+    // multiple GPU version: decompose along X
+    
+    // index within each decomposed domain
+    // size_t ind_global = (i-kpar->i0) * kpar->K * kpar->J + (j-kpar->j0) * kpar->K + (k-kpar->k0);
+    if (ind_global >= kpar->size) return;
+
+    int i, j, k; 
+    i = ind_global/(kpar->J*kpar->K);
+    j = (ind_global%(kpar->J*kpar->K))/kpar->K;
+    k = (ind_global%(kpar->J*kpar->K))%kpar->K;
+
+    if(kpar->K<kpar->Nx && kpar->k0!=0 && k==0) return;
+    if(kpar->K<kpar->Nx && kpar->k0+kpar->K!=kpar->Nx && k==kpar->K-1) return;
+    if(kpar->J<kpar->Ny && kpar->j0!=0 && j==0) return;
+    if(kpar->J<kpar->Ny && kpar->j0+kpar->J!=kpar->Ny && j==kpar->J-1) return;
+    if(kpar->I<kpar->Nz && kpar->i0!=0 && i==0) return;
+    if(kpar->I<kpar->Nz && kpar->i0+kpar->I!=kpar->Nz && i==kpar->I-1) return;
+
+    int ind_ijk, ind_ijp1k, ind_ip1jk, ind_ijkp1;
+    double dExdy, dExdz, dEydx, dEydz, dEzdx, dEzdy;
+    int ind_pml, ind_pml_param;
+    double b, C, kappa;
+    int srcind_src, srcind_size, srcind_size_offset;
+    double src_t;
+
+    ind_ijk = (i+1)*(kpar->J+2)*(kpar->K+2) + (j+1)*(kpar->K+2) + k + 1;
+    ind_ijp1k = ind_ijk + kpar->K + 2;
+    ind_ip1jk = ind_ijk + (kpar->J+2)*(kpar->K+2);
+    ind_ijkp1 = ind_ijk + 1;
+
+    // set up fields on the boundary
+    if (kpar->bc[0] != 'P' && k == kpar->Nx - kpar->k0){
+        kpar->Ey[ind_ijk] = 0.0;
+        kpar->Ez[ind_ijk] = 0.0;
+    }
+    if (kpar->bc[1] != 'P' && j == kpar->Ny - kpar->j0){
+        kpar->Ex[ind_ijk] = 0.0;
+        kpar->Ez[ind_ijk] = 0.0;
+    }
+    if (kpar->bc[2] != 'P' && i == kpar->Nz - kpar->i0){
+        kpar->Ex[ind_ijk] = 0.0;
+        kpar->Ey[ind_ijk] = 0.0;
+    }
+
+    dEzdy = kpar->odx * (kpar->Ez[ind_ijp1k] - kpar->Ez[ind_ijk]);
+    dEydz = kpar->odx * (kpar->Ey[ind_ip1jk] - kpar->Ey[ind_ijk]);
+    dExdz = kpar->odx * (kpar->Ex[ind_ip1jk] - kpar->Ex[ind_ijk]);
+    dEzdx = kpar->odx * (kpar->Ez[ind_ijkp1] - kpar->Ez[ind_ijk]);
+    dEydx = kpar->odx * (kpar->Ey[ind_ijkp1] - kpar->Ey[ind_ijk]);
+    dExdy = kpar->odx * (kpar->Ex[ind_ijp1k] - kpar->Ex[ind_ijk]);
+    kpar->Hx[ind_ijk] = kpar->Hx[ind_ijk] + kpar->dt * (dEydz - dEzdy);
+    kpar->Hy[ind_ijk] = kpar->Hy[ind_ijk] + kpar->dt * (dEzdx - dExdz);
+    kpar->Hz[ind_ijk] = kpar->Hz[ind_ijk] + kpar->dt * (dExdy - dEydx);
+
+    // Update PML
+    if (k + kpar->k0 < kpar->pml_xmin){
+        ind_pml = i * kpar->J * (kpar->pml_xmin - kpar->k0) + j * (kpar->pml_xmin - kpar->k0) + k;
+        ind_pml_param = kpar->pml_xmin - k - kpar->k0 - 1;
+        kappa = kpar->kappa_H_x[ind_pml_param];
+        b = kpar->bHx[ind_pml_param];
+        C = kpar->cHx[ind_pml_param];
+        kpar->pml_Eyx0[ind_pml] = C * dEydx + b * kpar->pml_Eyx0[ind_pml];
+        kpar->pml_Ezx0[ind_pml] = C * dEzdx + b * kpar->pml_Ezx0[ind_pml];
+        kpar->Hz[ind_ijk] = kpar->Hz[ind_ijk] - kpar->dt * (kpar->pml_Eyx0[ind_pml] - dEydx + dEydx / kappa);
+        kpar->Hy[ind_ijk] = kpar->Hy[ind_ijk] + kpar->dt * (kpar->pml_Ezx0[ind_pml] - dEzdx + dEzdx / kappa);
+    }
+    else if(k + kpar->k0 >= kpar->pml_xmax){
+        ind_pml = i * kpar->J * (kpar->k0 + kpar->K - kpar->pml_xmax) + j * (kpar->k0 + kpar->K - kpar->pml_xmax)
+                + k + kpar->k0 - kpar->pml_xmax;
+        ind_pml_param = k + kpar->k0 - kpar->pml_xmax + kpar->w_pml_x0;
+        kappa = kpar->kappa_H_x[ind_pml_param];
+        b = kpar->bHx[ind_pml_param];
+        C = kpar->cHx[ind_pml_param];
+        kpar->pml_Eyx1[ind_pml] = C * dEydx + b * kpar->pml_Eyx1[ind_pml];
+        kpar->pml_Ezx1[ind_pml] = C * dEzdx + b * kpar->pml_Ezx1[ind_pml];
+        kpar->Hz[ind_ijk] = kpar->Hz[ind_ijk] - kpar->dt * (kpar->pml_Eyx1[ind_pml] - dEydx + dEydx / kappa);
+        kpar->Hy[ind_ijk] = kpar->Hy[ind_ijk] + kpar->dt * (kpar->pml_Ezx1[ind_pml] - dEzdx + dEzdx / kappa);
+    }
+    if (j + kpar->j0 < kpar->pml_ymin){
+        ind_pml = i * (kpar->pml_ymin - kpar->j0) * kpar->K + j * kpar->K + k;
+        ind_pml_param = kpar->pml_ymin - j - kpar->j0 - 1;
+        kappa = kpar->kappa_H_y[ind_pml_param];
+        b = kpar->bHy[ind_pml_param];
+        C = kpar->cHy[ind_pml_param];
+        kpar->pml_Exy0[ind_pml] = C * dExdy + b * kpar->pml_Exy0[ind_pml];
+        kpar->pml_Ezy0[ind_pml] = C * dEzdy + b * kpar->pml_Ezy0[ind_pml];
+        kpar->Hz[ind_ijk] = kpar->Hz[ind_ijk] + kpar->dt * (kpar->pml_Exy0[ind_pml] - dExdy + dExdy / kappa);
+        kpar->Hx[ind_ijk] = kpar->Hx[ind_ijk] - kpar->dt * (kpar->pml_Ezy0[ind_pml] - dEzdy + dEzdy / kappa);
+    }
+    else if(j + kpar->j0 >= kpar->pml_ymax){
+        ind_pml = i * (kpar->j0 + kpar->J - kpar->pml_ymax) * kpar->K + (kpar->j0 + j - kpar->pml_ymax) * kpar->K + k;
+        ind_pml_param = j + kpar->j0 - kpar->pml_ymax + kpar->w_pml_y0;
+        kappa = kpar->kappa_H_y[ind_pml_param];
+        b = kpar->bHy[ind_pml_param];
+        C = kpar->cHy[ind_pml_param];
+        kpar->pml_Exy1[ind_pml] = C * dExdy + b * kpar->pml_Exy1[ind_pml];
+        kpar->pml_Ezy1[ind_pml] = C * dEzdy + b * kpar->pml_Ezy1[ind_pml];
+        kpar->Hz[ind_ijk] = kpar->Hz[ind_ijk] + kpar->dt * (kpar->pml_Exy1[ind_pml] - dExdy + dExdy / kappa);
+        kpar->Hx[ind_ijk] = kpar->Hx[ind_ijk] - kpar->dt * (kpar->pml_Ezy1[ind_pml] - dEzdy + dEzdy / kappa);
+    }
+    if (i + kpar->i0 < kpar->pml_zmin){
+        ind_pml = i * kpar->J * kpar->K + j * kpar->K + k;
+        ind_pml_param = kpar->pml_zmin - i - kpar->i0 - 1;
+        kappa = kpar->kappa_H_z[ind_pml_param];
+        b = kpar->bHz[ind_pml_param];
+        C = kpar->cHz[ind_pml_param];
+        kpar->pml_Exz0[ind_pml] = C * dExdz + b * kpar->pml_Exz0[ind_pml];
+        kpar->pml_Eyz0[ind_pml] = C * dEydz + b * kpar->pml_Eyz0[ind_pml];
+        kpar->Hx[ind_ijk] = kpar->Hx[ind_ijk] + kpar->dt * (kpar->pml_Eyz0[ind_pml] - dEydz + dEydz / kappa);
+        kpar->Hy[ind_ijk] = kpar->Hy[ind_ijk] - kpar->dt * (kpar->pml_Exz0[ind_pml] - dExdz + dExdz / kappa);
+    }
+    else if(i + kpar->i0 > kpar->pml_zmax){
+        ind_pml = (kpar->i0 + i - kpar->pml_zmax) * kpar->J * kpar->K + j * kpar->K + k;
+        ind_pml_param = i + kpar->i0 - kpar->pml_zmax + kpar->w_pml_z0;
+        kappa = kpar->kappa_H_z[ind_pml_param];
+        b = kpar->bHz[ind_pml_param];
+        C = kpar->cHz[ind_pml_param];
+        kpar->pml_Exz1[ind_pml] = C * dExdz + b * kpar->pml_Exz1[ind_pml];
+        kpar->pml_Eyz1[ind_pml] = C * dEydz + b * kpar->pml_Eyz1[ind_pml];
+        kpar->Hx[ind_ijk] = kpar->Hx[ind_ijk] + kpar->dt * (kpar->pml_Eyz1[ind_pml] - dEydz + dEydz / kappa);
+        kpar->Hy[ind_ijk] = kpar->Hy[ind_ijk] - kpar->dt * (kpar->pml_Exz1[ind_pml] - dExdz + dExdz / kappa);
+    }
+
+    // update sources
+    // kernel/domain's ind_global = i*_J*_K + j*_K + k;
+    srcind_size_offset = 0;
+    for(int ii = 0; ii < kpar->srclen; ii ++){
+        srcind_size = kpar->Is[ii]*kpar->Js[ii]*kpar->Ks[ii];
+        if( i+kpar->i0 >= kpar->i0s[ii] && j+kpar->j0 >= kpar->j0s[ii] && k+kpar->k0 >= kpar->k0s[ii]
+            && i+kpar->i0 < kpar->i0s[ii]+kpar->Is[ii] && j+kpar->j0 < kpar->j0s[ii]+kpar->Js[ii] && k+kpar->k0 < kpar->k0s[ii]+kpar->Ks[ii]){
+            srcind_src = (i+kpar->i0-kpar->i0s[ii])*kpar->Js[ii]*kpar->Ks[ii] + (j+kpar->j0-kpar->j0s[ii])*kpar->Ks[ii] + k+kpar->k0-kpar->k0s[ii];
+            if (kpar->t <= kpar->src_T){
+                src_t = sin(kpar->t + kpar->Mx[srcind_src+srcind_size_offset].imag)*((1+kpar->src_min)*exp(-(kpar->t-kpar->src_T)*(kpar->t-kpar->src_T)/kpar->src_k)-kpar->src_min);
+                kpar->Hx[ind_ijk] = kpar->Hx[ind_ijk] + src_t*kpar->Mx[srcind_src+srcind_size_offset].real*kpar->dt;
+                src_t = sin(kpar->t + kpar->My[srcind_src+srcind_size_offset].imag)*((1+kpar->src_min)*exp(-(kpar->t-kpar->src_T)*(kpar->t-kpar->src_T)/kpar->src_k)-kpar->src_min);
+                kpar->Hy[ind_ijk] = kpar->Hy[ind_ijk] + src_t*kpar->My[srcind_src+srcind_size_offset].real*kpar->dt;
+                src_t = sin(kpar->t + kpar->Mz[srcind_src+srcind_size_offset].imag)*((1+kpar->src_min)*exp(-(kpar->t-kpar->src_T)*(kpar->t-kpar->src_T)/kpar->src_k)-kpar->src_min);
+                kpar->Hz[ind_ijk] = kpar->Hz[ind_ijk] + src_t*kpar->Mz[srcind_src+srcind_size_offset].real*kpar->dt;
+            }
+            else{
+                src_t = sin(kpar->t + kpar->Mx[srcind_src+srcind_size_offset].imag);
+                kpar->Hx[ind_ijk] = kpar->Hx[ind_ijk] + src_t*kpar->Mx[srcind_src+srcind_size_offset].real*kpar->dt;
+                src_t = sin(kpar->t + kpar->My[srcind_src+srcind_size_offset].imag);
+                kpar->Hy[ind_ijk] = kpar->Hy[ind_ijk] + src_t*kpar->My[srcind_src+srcind_size_offset].real*kpar->dt;
+                src_t = sin(kpar->t + kpar->Mz[srcind_src+srcind_size_offset].imag);
+                kpar->Hz[ind_ijk] = kpar->Hz[ind_ijk] + src_t*kpar->Mz[srcind_src+srcind_size_offset].real*kpar->dt;
+            }
+        }
+        srcind_size_offset += srcind_size;
+    }
+}
+
+__global__ void kernel_update_H_border(kernelpar *kpar)
+{
+//     1D grid of 1D blocks
+    size_t ind_global = blockIdx.x * blockDim.x + threadIdx.x;
+    if (ind_global >= kpar->buffer_size) return;
+
+    int i, j, k; 
+    if(kpar->K < kpar->Nx){
+        i = (ind_global%(kpar->I*kpar->J))/kpar->J;
+        j = (ind_global%(kpar->I*kpar->J))%kpar->J;
+        if(kpar->k0==0){ k = kpar->K-1; }
+        else if(kpar->k0+kpar->K==kpar->Nx){ k=0; }
+        else{
+            k = (ind_global < kpar->I*kpar->J)? 0 : kpar->K-1;
+        }
+    }
+    else if(kpar->J < kpar->Ny){
+        i = (ind_global%(kpar->I*kpar->K))/kpar->K;
+        k = (ind_global%(kpar->I*kpar->K))%kpar->K;
+        if(kpar->j0==0){ j = kpar->J-1; }
+        else if(kpar->j0+kpar->J==kpar->Ny){ j=0; }
+        else{
+            j = (ind_global < kpar->I*kpar->K)? 0 : kpar->J-1;
+        }
+    }
+    else if(kpar->I < kpar->Nz){
+        j = (ind_global%(kpar->J*kpar->K))/kpar->K;
+        k = (ind_global%(kpar->J*kpar->K))%kpar->K;
+        if(kpar->i0==0){ i = kpar->I-1; }
+        else if(kpar->i0+kpar->I==kpar->Nz){ i=0; }
+        else{
+            i = (ind_global < kpar->J*kpar->K)? 0 : kpar->I-1;
+        }
+    }
+    else{
+        return;
+    }
+
+    int ind_ijk, ind_ijp1k, ind_ip1jk, ind_ijkp1;
+    double dExdy, dExdz, dEydx, dEydz, dEzdx, dEzdy;
+    int ind_pml, ind_pml_param;
+    double b, C, kappa;
+    int srcind_src, srcind_size, srcind_size_offset;
+    double src_t;
+
+    ind_ijk = (i+1)*(kpar->J+2)*(kpar->K+2) + (j+1)*(kpar->K+2) + k + 1;
+    ind_ijp1k = ind_ijk + kpar->K + 2;
+    ind_ip1jk = ind_ijk + (kpar->J+2)*(kpar->K+2);
+    ind_ijkp1 = ind_ijk + 1;
+
+    // set up fields on the boundary
+    if (kpar->bc[0] != 'P' && k == kpar->Nx - kpar->k0){
+        kpar->Ey[ind_ijk] = 0.0;
+        kpar->Ez[ind_ijk] = 0.0;
+    }
+    if (kpar->bc[1] != 'P' && j == kpar->Ny - kpar->j0){
+        kpar->Ex[ind_ijk] = 0.0;
+        kpar->Ez[ind_ijk] = 0.0;
+    }
+    if (kpar->bc[2] != 'P' && i == kpar->Nz - kpar->i0){
+        kpar->Ex[ind_ijk] = 0.0;
+        kpar->Ey[ind_ijk] = 0.0;
+    }
+
+    dEzdy = kpar->odx * (kpar->Ez[ind_ijp1k] - kpar->Ez[ind_ijk]);
+    dEydz = kpar->odx * (kpar->Ey[ind_ip1jk] - kpar->Ey[ind_ijk]);
+    dExdz = kpar->odx * (kpar->Ex[ind_ip1jk] - kpar->Ex[ind_ijk]);
+    dEzdx = kpar->odx * (kpar->Ez[ind_ijkp1] - kpar->Ez[ind_ijk]);
+    dEydx = kpar->odx * (kpar->Ey[ind_ijkp1] - kpar->Ey[ind_ijk]);
+    dExdy = kpar->odx * (kpar->Ex[ind_ijp1k] - kpar->Ex[ind_ijk]);
+    kpar->Hx[ind_ijk] = kpar->Hx[ind_ijk] + kpar->dt * (dEydz - dEzdy);
+    kpar->Hy[ind_ijk] = kpar->Hy[ind_ijk] + kpar->dt * (dEzdx - dExdz);
+    kpar->Hz[ind_ijk] = kpar->Hz[ind_ijk] + kpar->dt * (dExdy - dEydx);
+
+    // Update PML
+    if (k + kpar->k0 < kpar->pml_xmin){
+        ind_pml = i * kpar->J * (kpar->pml_xmin - kpar->k0) + j * (kpar->pml_xmin - kpar->k0) + k;
+        ind_pml_param = kpar->pml_xmin - k - kpar->k0 - 1;
+        kappa = kpar->kappa_H_x[ind_pml_param];
+        b = kpar->bHx[ind_pml_param];
+        C = kpar->cHx[ind_pml_param];
+        kpar->pml_Eyx0[ind_pml] = C * dEydx + b * kpar->pml_Eyx0[ind_pml];
+        kpar->pml_Ezx0[ind_pml] = C * dEzdx + b * kpar->pml_Ezx0[ind_pml];
+        kpar->Hz[ind_ijk] = kpar->Hz[ind_ijk] - kpar->dt * (kpar->pml_Eyx0[ind_pml] - dEydx + dEydx / kappa);
+        kpar->Hy[ind_ijk] = kpar->Hy[ind_ijk] + kpar->dt * (kpar->pml_Ezx0[ind_pml] - dEzdx + dEzdx / kappa);
+    }
+    else if(k + kpar->k0 >= kpar->pml_xmax){
+        ind_pml = i * kpar->J * (kpar->k0 + kpar->K - kpar->pml_xmax) + j * (kpar->k0 + kpar->K - kpar->pml_xmax)
+                + k + kpar->k0 - kpar->pml_xmax;
+        ind_pml_param = k + kpar->k0 - kpar->pml_xmax + kpar->w_pml_x0;
+        kappa = kpar->kappa_H_x[ind_pml_param];
+        b = kpar->bHx[ind_pml_param];
+        C = kpar->cHx[ind_pml_param];
+        kpar->pml_Eyx1[ind_pml] = C * dEydx + b * kpar->pml_Eyx1[ind_pml];
+        kpar->pml_Ezx1[ind_pml] = C * dEzdx + b * kpar->pml_Ezx1[ind_pml];
+        kpar->Hz[ind_ijk] = kpar->Hz[ind_ijk] - kpar->dt * (kpar->pml_Eyx1[ind_pml] - dEydx + dEydx / kappa);
+        kpar->Hy[ind_ijk] = kpar->Hy[ind_ijk] + kpar->dt * (kpar->pml_Ezx1[ind_pml] - dEzdx + dEzdx / kappa);
+    }
+    if (j + kpar->j0 < kpar->pml_ymin){
+        ind_pml = i * (kpar->pml_ymin - kpar->j0) * kpar->K + j * kpar->K + k;
+        ind_pml_param = kpar->pml_ymin - j - kpar->j0 - 1;
+        kappa = kpar->kappa_H_y[ind_pml_param];
+        b = kpar->bHy[ind_pml_param];
+        C = kpar->cHy[ind_pml_param];
+        kpar->pml_Exy0[ind_pml] = C * dExdy + b * kpar->pml_Exy0[ind_pml];
+        kpar->pml_Ezy0[ind_pml] = C * dEzdy + b * kpar->pml_Ezy0[ind_pml];
+        kpar->Hz[ind_ijk] = kpar->Hz[ind_ijk] + kpar->dt * (kpar->pml_Exy0[ind_pml] - dExdy + dExdy / kappa);
+        kpar->Hx[ind_ijk] = kpar->Hx[ind_ijk] - kpar->dt * (kpar->pml_Ezy0[ind_pml] - dEzdy + dEzdy / kappa);
+    }
+    else if(j + kpar->j0 >= kpar->pml_ymax){
+        ind_pml = i * (kpar->j0 + kpar->J - kpar->pml_ymax) * kpar->K + (kpar->j0 + j - kpar->pml_ymax) * kpar->K + k;
+        ind_pml_param = j + kpar->j0 - kpar->pml_ymax + kpar->w_pml_y0;
+        kappa = kpar->kappa_H_y[ind_pml_param];
+        b = kpar->bHy[ind_pml_param];
+        C = kpar->cHy[ind_pml_param];
+        kpar->pml_Exy1[ind_pml] = C * dExdy + b * kpar->pml_Exy1[ind_pml];
+        kpar->pml_Ezy1[ind_pml] = C * dEzdy + b * kpar->pml_Ezy1[ind_pml];
+        kpar->Hz[ind_ijk] = kpar->Hz[ind_ijk] + kpar->dt * (kpar->pml_Exy1[ind_pml] - dExdy + dExdy / kappa);
+        kpar->Hx[ind_ijk] = kpar->Hx[ind_ijk] - kpar->dt * (kpar->pml_Ezy1[ind_pml] - dEzdy + dEzdy / kappa);
+    }
+    if (i + kpar->i0 < kpar->pml_zmin){
+        ind_pml = i * kpar->J * kpar->K + j * kpar->K + k;
+        ind_pml_param = kpar->pml_zmin - i - kpar->i0 - 1;
+        kappa = kpar->kappa_H_z[ind_pml_param];
+        b = kpar->bHz[ind_pml_param];
+        C = kpar->cHz[ind_pml_param];
+        kpar->pml_Exz0[ind_pml] = C * dExdz + b * kpar->pml_Exz0[ind_pml];
+        kpar->pml_Eyz0[ind_pml] = C * dEydz + b * kpar->pml_Eyz0[ind_pml];
+        kpar->Hx[ind_ijk] = kpar->Hx[ind_ijk] + kpar->dt * (kpar->pml_Eyz0[ind_pml] - dEydz + dEydz / kappa);
+        kpar->Hy[ind_ijk] = kpar->Hy[ind_ijk] - kpar->dt * (kpar->pml_Exz0[ind_pml] - dExdz + dExdz / kappa);
+    }
+    else if(i + kpar->i0 > kpar->pml_zmax){
+        ind_pml = (kpar->i0 + i - kpar->pml_zmax) * kpar->J * kpar->K + j * kpar->K + k;
+        ind_pml_param = i + kpar->i0 - kpar->pml_zmax + kpar->w_pml_z0;
+        kappa = kpar->kappa_H_z[ind_pml_param];
+        b = kpar->bHz[ind_pml_param];
+        C = kpar->cHz[ind_pml_param];
+        kpar->pml_Exz1[ind_pml] = C * dExdz + b * kpar->pml_Exz1[ind_pml];
+        kpar->pml_Eyz1[ind_pml] = C * dEydz + b * kpar->pml_Eyz1[ind_pml];
+        kpar->Hx[ind_ijk] = kpar->Hx[ind_ijk] + kpar->dt * (kpar->pml_Eyz1[ind_pml] - dEydz + dEydz / kappa);
+        kpar->Hy[ind_ijk] = kpar->Hy[ind_ijk] - kpar->dt * (kpar->pml_Exz1[ind_pml] - dExdz + dExdz / kappa);
+    }
+
+    // update sources
+    // kernel/domain's ind_global = i*_J*_K + j*_K + k;
+    srcind_size_offset = 0;
+    for(int ii = 0; ii < kpar->srclen; ii ++){
+        srcind_size = kpar->Is[ii]*kpar->Js[ii]*kpar->Ks[ii];
+        if( i+kpar->i0 >= kpar->i0s[ii] && j+kpar->j0 >= kpar->j0s[ii] && k+kpar->k0 >= kpar->k0s[ii]
+            && i+kpar->i0 < kpar->i0s[ii]+kpar->Is[ii] && j+kpar->j0 < kpar->j0s[ii]+kpar->Js[ii] && k+kpar->k0 < kpar->k0s[ii]+kpar->Ks[ii]){
+            srcind_src = (i+kpar->i0-kpar->i0s[ii])*kpar->Js[ii]*kpar->Ks[ii] + (j+kpar->j0-kpar->j0s[ii])*kpar->Ks[ii] + k+kpar->k0-kpar->k0s[ii];
+            if (kpar->t <= kpar->src_T){
+                src_t = sin(kpar->t + kpar->Mx[srcind_src+srcind_size_offset].imag)*((1+kpar->src_min)*exp(-(kpar->t-kpar->src_T)*(kpar->t-kpar->src_T)/kpar->src_k)-kpar->src_min);
+                kpar->Hx[ind_ijk] = kpar->Hx[ind_ijk] + src_t*kpar->Mx[srcind_src+srcind_size_offset].real*kpar->dt;
+                src_t = sin(kpar->t + kpar->My[srcind_src+srcind_size_offset].imag)*((1+kpar->src_min)*exp(-(kpar->t-kpar->src_T)*(kpar->t-kpar->src_T)/kpar->src_k)-kpar->src_min);
+                kpar->Hy[ind_ijk] = kpar->Hy[ind_ijk] + src_t*kpar->My[srcind_src+srcind_size_offset].real*kpar->dt;
+                src_t = sin(kpar->t + kpar->Mz[srcind_src+srcind_size_offset].imag)*((1+kpar->src_min)*exp(-(kpar->t-kpar->src_T)*(kpar->t-kpar->src_T)/kpar->src_k)-kpar->src_min);
+                kpar->Hz[ind_ijk] = kpar->Hz[ind_ijk] + src_t*kpar->Mz[srcind_src+srcind_size_offset].real*kpar->dt;
+            }
+            else{
+                src_t = sin(kpar->t + kpar->Mx[srcind_src+srcind_size_offset].imag);
+                kpar->Hx[ind_ijk] = kpar->Hx[ind_ijk] + src_t*kpar->Mx[srcind_src+srcind_size_offset].real*kpar->dt;
+                src_t = sin(kpar->t + kpar->My[srcind_src+srcind_size_offset].imag);
+                kpar->Hy[ind_ijk] = kpar->Hy[ind_ijk] + src_t*kpar->My[srcind_src+srcind_size_offset].real*kpar->dt;
+                src_t = sin(kpar->t + kpar->Mz[srcind_src+srcind_size_offset].imag);
+                kpar->Hz[ind_ijk] = kpar->Hz[ind_ijk] + src_t*kpar->Mz[srcind_src+srcind_size_offset].real*kpar->dt;
+            }
+        }
+        srcind_size_offset += srcind_size;
+    }
+
+    // store left ghost layers
+    if(kpar->K<kpar->Nx && kpar->k0!=0 && k==0){
+        kpar->H_ghostleft[(i-kpar->i0)*kpar->J+j-kpar->j0+kpar->I*kpar->J*0] = kpar->Hx[ind_ijk];
+        kpar->H_ghostleft[(i-kpar->i0)*kpar->J+j-kpar->j0+kpar->I*kpar->J*1] = kpar->Hy[ind_ijk];
+        kpar->H_ghostleft[(i-kpar->i0)*kpar->J+j-kpar->j0+kpar->I*kpar->J*2] = kpar->Hz[ind_ijk];
+    }
+    if(kpar->J<kpar->Ny && kpar->j0!=0 && j==0){
+        kpar->H_ghostleft[(i-kpar->i0)*kpar->K+k-kpar->k0+kpar->I*kpar->K*0] = kpar->Hx[ind_ijk];
+        kpar->H_ghostleft[(i-kpar->i0)*kpar->K+k-kpar->k0+kpar->I*kpar->K*1] = kpar->Hy[ind_ijk];
+        kpar->H_ghostleft[(i-kpar->i0)*kpar->K+k-kpar->k0+kpar->I*kpar->K*2] = kpar->Hz[ind_ijk];
+    }
+    if(kpar->I<kpar->Nz && kpar->i0!=0 && i==0){
+        kpar->H_ghostleft[(j-kpar->j0)*kpar->K+k-kpar->k0+kpar->J*kpar->K*0] = kpar->Hx[ind_ijk];
+        kpar->H_ghostleft[(j-kpar->j0)*kpar->K+k-kpar->k0+kpar->J*kpar->K*1] = kpar->Hy[ind_ijk];
+        kpar->H_ghostleft[(j-kpar->j0)*kpar->K+k-kpar->k0+kpar->J*kpar->K*2] = kpar->Hz[ind_ijk];
+    }
+    // store right ghost layers
+    if(kpar->K<kpar->Nx && kpar->k0+kpar->K!=kpar->Nx && k==kpar->K-1){
+        kpar->H_ghostright[(i-kpar->i0)*kpar->J+j-kpar->j0+kpar->I*kpar->J*0] = kpar->Hx[ind_ijk];
+        kpar->H_ghostright[(i-kpar->i0)*kpar->J+j-kpar->j0+kpar->I*kpar->J*1] = kpar->Hy[ind_ijk];
+        kpar->H_ghostright[(i-kpar->i0)*kpar->J+j-kpar->j0+kpar->I*kpar->J*2] = kpar->Hz[ind_ijk];
+    }
+    if(kpar->J<kpar->Ny && kpar->j0+kpar->J!=kpar->Ny && j==kpar->J-1){
+        kpar->H_ghostright[(i-kpar->i0)*kpar->K+k-kpar->k0+kpar->I*kpar->K*0] = kpar->Hx[ind_ijk];
+        kpar->H_ghostright[(i-kpar->i0)*kpar->K+k-kpar->k0+kpar->I*kpar->K*1] = kpar->Hy[ind_ijk];
+        kpar->H_ghostright[(i-kpar->i0)*kpar->K+k-kpar->k0+kpar->I*kpar->K*2] = kpar->Hz[ind_ijk];
+    }
+    if(kpar->I<kpar->Nz && kpar->i0+kpar->I!=kpar->Nz && i==kpar->I-1){
+        kpar->H_ghostright[(j-kpar->j0)*kpar->K+k-kpar->k0+kpar->J*kpar->K*0] = kpar->Hx[ind_ijk];
+        kpar->H_ghostright[(j-kpar->j0)*kpar->K+k-kpar->k0+kpar->J*kpar->K*1] = kpar->Hy[ind_ijk];
+        kpar->H_ghostright[(j-kpar->j0)*kpar->K+k-kpar->k0+kpar->J*kpar->K*2] = kpar->Hz[ind_ijk];
+    }
+}
+
+__global__ void kernel_load_ghostlayerH(kernelpar *kpar)
+{
+    size_t ind_global = blockIdx.x * blockDim.x + threadIdx.x;
+    if (ind_global >= kpar->buffer_size) return;
+    
+    int i, j, k, ind_ijk;
+    if(kpar->K<kpar->Nx){
+        i = (ind_global%(kpar->I*kpar->J))/kpar->J;
+        j = (ind_global%(kpar->I*kpar->J))%kpar->J;
+        if(kpar->k0==0){
+            ind_ijk = (i+1)*(kpar->J+2)*(kpar->K+2)+(j+1)*(kpar->K+2)+kpar->K+1;
+            kpar->Hx[ind_ijk] = kpar->H_bufferright[(i-kpar->i0)*kpar->J+j-kpar->j0+kpar->I*kpar->J*0];
+            kpar->Hy[ind_ijk] = kpar->H_bufferright[(i-kpar->i0)*kpar->J+j-kpar->j0+kpar->I*kpar->J*1];
+            kpar->Hz[ind_ijk] = kpar->H_bufferright[(i-kpar->i0)*kpar->J+j-kpar->j0+kpar->I*kpar->J*2];
+        }
+        else if(kpar->k0+kpar->K==kpar->Nx){
+            ind_ijk = (i+1)*(kpar->J+2)*(kpar->K+2)+(j+1)*(kpar->K+2)+0;
+            kpar->Hx[ind_ijk] = kpar->H_bufferleft[(i-kpar->i0)*kpar->J+j-kpar->j0+kpar->I*kpar->J*0];
+            kpar->Hy[ind_ijk] = kpar->H_bufferleft[(i-kpar->i0)*kpar->J+j-kpar->j0+kpar->I*kpar->J*1];
+            kpar->Hz[ind_ijk] = kpar->H_bufferleft[(i-kpar->i0)*kpar->J+j-kpar->j0+kpar->I*kpar->J*2];
+        }
+        else{
+            if(ind_global < kpar->I*kpar->J){
+                ind_ijk = (i+1)*(kpar->J+2)*(kpar->K+2)+(j+1)*(kpar->K+2)+kpar->K+1;
+                kpar->Hx[ind_ijk] = kpar->H_bufferright[(i-kpar->i0)*kpar->J+j-kpar->j0+kpar->I*kpar->J*0];
+                kpar->Hy[ind_ijk] = kpar->H_bufferright[(i-kpar->i0)*kpar->J+j-kpar->j0+kpar->I*kpar->J*1];
+                kpar->Hz[ind_ijk] = kpar->H_bufferright[(i-kpar->i0)*kpar->J+j-kpar->j0+kpar->I*kpar->J*2];
+            }
+            else{
+                ind_ijk = (i+1)*(kpar->J+2)*(kpar->K+2)+(j+1)*(kpar->K+2)+0;
+                kpar->Hx[ind_ijk] = kpar->H_bufferleft[(i-kpar->i0)*kpar->J+j-kpar->j0+kpar->I*kpar->J*0];
+                kpar->Hy[ind_ijk] = kpar->H_bufferleft[(i-kpar->i0)*kpar->J+j-kpar->j0+kpar->I*kpar->J*1];
+                kpar->Hz[ind_ijk] = kpar->H_bufferleft[(i-kpar->i0)*kpar->J+j-kpar->j0+kpar->I*kpar->J*2];
+            }
+        }
+    }
+    if(kpar->J<kpar->Ny){
+        i = (ind_global%(kpar->I*kpar->K))/kpar->K;
+        k = (ind_global%(kpar->I*kpar->K))%kpar->K;
+        if(kpar->j0==0){
+            ind_ijk = (i+1)*(kpar->J+2)*(kpar->K+2)+(kpar->J+1)*(kpar->K+2)+k+1;
+            kpar->Hx[ind_ijk] = kpar->H_bufferright[(i-kpar->i0)*kpar->K+k-kpar->k0+kpar->I*kpar->K*0];
+            kpar->Hy[ind_ijk] = kpar->H_bufferright[(i-kpar->i0)*kpar->K+k-kpar->k0+kpar->I*kpar->K*1];
+            kpar->Hz[ind_ijk] = kpar->H_bufferright[(i-kpar->i0)*kpar->K+k-kpar->k0+kpar->I*kpar->K*2];
+        }
+        else if(kpar->j0+kpar->J==kpar->Ny){
+            ind_ijk = (i+1)*(kpar->J+2)*(kpar->K+2)+(0)*(kpar->K+2)+k+1;
+            kpar->Hx[ind_ijk] = kpar->H_bufferleft[(i-kpar->i0)*kpar->K+k-kpar->k0+kpar->I*kpar->K*0];
+            kpar->Hy[ind_ijk] = kpar->H_bufferleft[(i-kpar->i0)*kpar->K+k-kpar->k0+kpar->I*kpar->K*1];
+            kpar->Hz[ind_ijk] = kpar->H_bufferleft[(i-kpar->i0)*kpar->K+k-kpar->k0+kpar->I*kpar->K*2];
+        }
+        else{
+            if(ind_global < kpar->I*kpar->K){
+                ind_ijk = (i+1)*(kpar->J+2)*(kpar->K+2)+(kpar->J+1)*(kpar->K+2)+k+1;
+                kpar->Hx[ind_ijk] = kpar->H_bufferright[(i-kpar->i0)*kpar->K+k-kpar->k0+kpar->I*kpar->K*0];
+                kpar->Hy[ind_ijk] = kpar->H_bufferright[(i-kpar->i0)*kpar->K+k-kpar->k0+kpar->I*kpar->K*1];
+                kpar->Hz[ind_ijk] = kpar->H_bufferright[(i-kpar->i0)*kpar->K+k-kpar->k0+kpar->I*kpar->K*2];
+            }
+            else{
+                ind_ijk = (i+1)*(kpar->J+2)*(kpar->K+2)+(0)*(kpar->K+2)+k+1;
+                kpar->Hx[ind_ijk] = kpar->H_bufferleft[(i-kpar->i0)*kpar->K+k-kpar->k0+kpar->I*kpar->K*0];
+                kpar->Hy[ind_ijk] = kpar->H_bufferleft[(i-kpar->i0)*kpar->K+k-kpar->k0+kpar->I*kpar->K*1];
+                kpar->Hz[ind_ijk] = kpar->H_bufferleft[(i-kpar->i0)*kpar->K+k-kpar->k0+kpar->I*kpar->K*2];
+            }
+        }
+    }
+    if(kpar->I<kpar->Nz){
+        j = (ind_global%(kpar->J*kpar->K))/kpar->K;
+        k = (ind_global%(kpar->J*kpar->K))%kpar->K;
+        if(kpar->i0==0){
+            ind_ijk = (kpar->I+1)*(kpar->J+2)*(kpar->K+2)+(j+1)*(kpar->K+2)+k+1;
+            kpar->Hx[ind_ijk] = kpar->H_bufferright[(j-kpar->j0)*kpar->K+k-kpar->k0+kpar->J*kpar->K*0];
+            kpar->Hy[ind_ijk] = kpar->H_bufferright[(j-kpar->j0)*kpar->K+k-kpar->k0+kpar->J*kpar->K*1];
+            kpar->Hz[ind_ijk] = kpar->H_bufferright[(j-kpar->j0)*kpar->K+k-kpar->k0+kpar->J*kpar->K*2];
+        }
+        else if(kpar->i0+kpar->I==kpar->Nz){
+            ind_ijk = (0)*(kpar->J+2)*(kpar->K+2)+(j+1)*(kpar->K+2)+k+1;
+            kpar->Hx[ind_ijk] = kpar->H_bufferleft[(j-kpar->j0)*kpar->K+k-kpar->k0+kpar->J*kpar->K*0];
+            kpar->Hy[ind_ijk] = kpar->H_bufferleft[(j-kpar->j0)*kpar->K+k-kpar->k0+kpar->J*kpar->K*1];
+            kpar->Hz[ind_ijk] = kpar->H_bufferleft[(j-kpar->j0)*kpar->K+k-kpar->k0+kpar->J*kpar->K*2];
+        }
+        else{
+            if(ind_global < kpar->J*kpar->K){
+                ind_ijk = (kpar->I+1)*(kpar->J+2)*(kpar->K+2)+(j+1)*(kpar->K+2)+k+1;
+                kpar->Hx[ind_ijk] = kpar->H_bufferright[(j-kpar->j0)*kpar->K+k-kpar->k0+kpar->J*kpar->K*0];
+                kpar->Hy[ind_ijk] = kpar->H_bufferright[(j-kpar->j0)*kpar->K+k-kpar->k0+kpar->J*kpar->K*1];
+                kpar->Hz[ind_ijk] = kpar->H_bufferright[(j-kpar->j0)*kpar->K+k-kpar->k0+kpar->J*kpar->K*2];
+            }
+            else{
+                ind_ijk = (0)*(kpar->J+2)*(kpar->K+2)+(j+1)*(kpar->K+2)+k+1;
+                kpar->Hx[ind_ijk] = kpar->H_bufferleft[(j-kpar->j0)*kpar->K+k-kpar->k0+kpar->J*kpar->K*0];
+                kpar->Hy[ind_ijk] = kpar->H_bufferleft[(j-kpar->j0)*kpar->K+k-kpar->k0+kpar->J*kpar->K*1];
+                kpar->Hz[ind_ijk] = kpar->H_bufferleft[(j-kpar->j0)*kpar->K+k-kpar->k0+kpar->J*kpar->K*2];
+            }
+        }
+    }
+}
+
+__global__ void kernel_load_ghostlayerE(kernelpar *kpar)
+{
+    size_t ind_global = blockIdx.x * blockDim.x + threadIdx.x;
+    if (ind_global >= kpar->buffer_size) return;
+
+    int i, j, k, ind_ijk;
+    if(kpar->K<kpar->Nx){
+        i = (ind_global%(kpar->I*kpar->J))/kpar->J;
+        j = (ind_global%(kpar->I*kpar->J))%kpar->J;
+        if(kpar->k0==0){
+            ind_ijk = (i+1)*(kpar->J+2)*(kpar->K+2)+(j+1)*(kpar->K+2)+kpar->K+1;
+            kpar->Ex[ind_ijk] = kpar->E_bufferright[(i-kpar->i0)*kpar->J+j-kpar->j0+kpar->I*kpar->J*0];
+            kpar->Ey[ind_ijk] = kpar->E_bufferright[(i-kpar->i0)*kpar->J+j-kpar->j0+kpar->I*kpar->J*1];
+            kpar->Ez[ind_ijk] = kpar->E_bufferright[(i-kpar->i0)*kpar->J+j-kpar->j0+kpar->I*kpar->J*2];
+        }
+        else if(kpar->k0+kpar->K==kpar->Nx){
+            ind_ijk = (i+1)*(kpar->J+2)*(kpar->K+2)+(j+1)*(kpar->K+2)+0;
+            kpar->Ex[ind_ijk] = kpar->E_bufferleft[(i-kpar->i0)*kpar->J+j-kpar->j0+kpar->I*kpar->J*0];
+            kpar->Ey[ind_ijk] = kpar->E_bufferleft[(i-kpar->i0)*kpar->J+j-kpar->j0+kpar->I*kpar->J*1];
+            kpar->Ez[ind_ijk] = kpar->E_bufferleft[(i-kpar->i0)*kpar->J+j-kpar->j0+kpar->I*kpar->J*2];
+        }
+        else{
+            if(ind_global < kpar->I*kpar->J){
+                ind_ijk = (i+1)*(kpar->J+2)*(kpar->K+2)+(j+1)*(kpar->K+2)+0;
+                kpar->Ex[ind_ijk] = kpar->E_bufferleft[(i-kpar->i0)*kpar->J+j-kpar->j0+kpar->I*kpar->J*0];
+                kpar->Ey[ind_ijk] = kpar->E_bufferleft[(i-kpar->i0)*kpar->J+j-kpar->j0+kpar->I*kpar->J*1];
+                kpar->Ez[ind_ijk] = kpar->E_bufferleft[(i-kpar->i0)*kpar->J+j-kpar->j0+kpar->I*kpar->J*2];
+            }
+            else{
+                ind_ijk = (i+1)*(kpar->J+2)*(kpar->K+2)+(j+1)*(kpar->K+2)+kpar->K+1;
+                kpar->Ex[ind_ijk] = kpar->E_bufferright[(i-kpar->i0)*kpar->J+j-kpar->j0+kpar->I*kpar->J*0];
+                kpar->Ey[ind_ijk] = kpar->E_bufferright[(i-kpar->i0)*kpar->J+j-kpar->j0+kpar->I*kpar->J*1];
+                kpar->Ez[ind_ijk] = kpar->E_bufferright[(i-kpar->i0)*kpar->J+j-kpar->j0+kpar->I*kpar->J*2];
+            }
+        }
+    }
+    if(kpar->J<kpar->Ny){
+        i = (ind_global%(kpar->I*kpar->K))/kpar->K;
+        k = (ind_global%(kpar->I*kpar->K))%kpar->K;
+        if(kpar->j0==0){
+            ind_ijk = (i+1)*(kpar->J+2)*(kpar->K+2)+(kpar->J+1)*(kpar->K+2)+k+1;
+            kpar->Ex[ind_ijk] = kpar->E_bufferright[(i-kpar->i0)*kpar->K+k-kpar->k0+kpar->I*kpar->K*0];
+            kpar->Ey[ind_ijk] = kpar->E_bufferright[(i-kpar->i0)*kpar->K+k-kpar->k0+kpar->I*kpar->K*1];
+            kpar->Ez[ind_ijk] = kpar->E_bufferright[(i-kpar->i0)*kpar->K+k-kpar->k0+kpar->I*kpar->K*2];
+        }
+        else if(kpar->j0+kpar->J==kpar->Ny){
+            ind_ijk = (i+1)*(kpar->J+2)*(kpar->K+2)+(0)*(kpar->K+2)+k+1;
+            kpar->Ex[ind_ijk] = kpar->E_bufferleft[(i-kpar->i0)*kpar->K+k-kpar->k0+kpar->I*kpar->K*0];
+            kpar->Ey[ind_ijk] = kpar->E_bufferleft[(i-kpar->i0)*kpar->K+k-kpar->k0+kpar->I*kpar->K*1];
+            kpar->Ez[ind_ijk] = kpar->E_bufferleft[(i-kpar->i0)*kpar->K+k-kpar->k0+kpar->I*kpar->K*2];
+        }
+        else{
+            if(ind_global < kpar->I*kpar->K){
+                ind_ijk = (i+1)*(kpar->J+2)*(kpar->K+2)+(0)*(kpar->K+2)+k+1;
+                kpar->Ex[ind_ijk] = kpar->E_bufferleft[(i-kpar->i0)*kpar->K+k-kpar->k0+kpar->I*kpar->K*0];
+                kpar->Ey[ind_ijk] = kpar->E_bufferleft[(i-kpar->i0)*kpar->K+k-kpar->k0+kpar->I*kpar->K*1];
+                kpar->Ez[ind_ijk] = kpar->E_bufferleft[(i-kpar->i0)*kpar->K+k-kpar->k0+kpar->I*kpar->K*2];
+            }
+            else{
+                ind_ijk = (i+1)*(kpar->J+2)*(kpar->K+2)+(kpar->J+1)*(kpar->K+2)+k+1;
+                kpar->Ex[ind_ijk] = kpar->E_bufferright[(i-kpar->i0)*kpar->K+k-kpar->k0+kpar->I*kpar->K*0];
+                kpar->Ey[ind_ijk] = kpar->E_bufferright[(i-kpar->i0)*kpar->K+k-kpar->k0+kpar->I*kpar->K*1];
+                kpar->Ez[ind_ijk] = kpar->E_bufferright[(i-kpar->i0)*kpar->K+k-kpar->k0+kpar->I*kpar->K*2];
+            }
+        }
+    }
+    if(kpar->I<kpar->Nz){
+        j = (ind_global%(kpar->J*kpar->K))/kpar->K;
+        k = (ind_global%(kpar->J*kpar->K))%kpar->K;
+        if(kpar->i0==0){
+            ind_ijk = (kpar->I+1)*(kpar->J+2)*(kpar->K+2)+(j+1)*(kpar->K+2)+k+1;
+            kpar->Ex[ind_ijk] = kpar->E_bufferright[(j-kpar->j0)*kpar->K+k-kpar->k0+kpar->J*kpar->K*0];
+            kpar->Ey[ind_ijk] = kpar->E_bufferright[(j-kpar->j0)*kpar->K+k-kpar->k0+kpar->J*kpar->K*1];
+            kpar->Ez[ind_ijk] = kpar->E_bufferright[(j-kpar->j0)*kpar->K+k-kpar->k0+kpar->J*kpar->K*2];
+        }
+        else if(kpar->i0+kpar->I==kpar->Nz){
+            ind_ijk = (0)*(kpar->J+2)*(kpar->K+2)+(j+1)*(kpar->K+2)+k+1;
+            kpar->Ex[ind_ijk] = kpar->E_bufferleft[(j-kpar->j0)*kpar->K+k-kpar->k0+kpar->J*kpar->K*0];
+            kpar->Ey[ind_ijk] = kpar->E_bufferleft[(j-kpar->j0)*kpar->K+k-kpar->k0+kpar->J*kpar->K*1];
+            kpar->Ez[ind_ijk] = kpar->E_bufferleft[(j-kpar->j0)*kpar->K+k-kpar->k0+kpar->J*kpar->K*2];
+        }
+        else{
+            if(ind_global < kpar->J*kpar->K){
+                ind_ijk = (0)*(kpar->J+2)*(kpar->K+2)+(j+1)*(kpar->K+2)+k+1;
+                kpar->Ex[ind_ijk] = kpar->E_bufferleft[(j-kpar->j0)*kpar->K+k-kpar->k0+kpar->J*kpar->K*0];
+                kpar->Ey[ind_ijk] = kpar->E_bufferleft[(j-kpar->j0)*kpar->K+k-kpar->k0+kpar->J*kpar->K*1];
+                kpar->Ez[ind_ijk] = kpar->E_bufferleft[(j-kpar->j0)*kpar->K+k-kpar->k0+kpar->J*kpar->K*2];
+            }
+            else{
+                ind_ijk = (kpar->I+1)*(kpar->J+2)*(kpar->K+2)+(j+1)*(kpar->K+2)+k+1;
+                kpar->Ex[ind_ijk] = kpar->E_bufferright[(j-kpar->j0)*kpar->K+k-kpar->k0+kpar->J*kpar->K*0];
+                kpar->Ey[ind_ijk] = kpar->E_bufferright[(j-kpar->j0)*kpar->K+k-kpar->k0+kpar->J*kpar->K*1];
+                kpar->Ez[ind_ijk] = kpar->E_bufferright[(j-kpar->j0)*kpar->K+k-kpar->k0+kpar->J*kpar->K*2];
+            }
+        }
+    }
+}
+
+__global__ void kernel_update_E_bulk(kernelpar *kpar)
+{
+//     1D grid of 1D blocks
+    size_t ind_global = blockIdx.x * blockDim.x + threadIdx.x;
+    // multiple GPU version: decompose along X
+    // size_t ind_global = (i-kpar->i0) * kpar->K * kpar->J + (j-kpar->j0) * kpar->K + (k-kpar->k0);
+//     1D grid of 2D blocks
+//     size_t ind_global = blockIdx.x * blockDim.x * blockDim.y + threadIdx.y * blockDim.x + threadIdx.x;
+//     2D grid of 1D blocks
+//     size_t ind_global = (gridDim.x * blockIdx.y + blockIdx.x) * blockDim.x + threadIdx.x;
+
+    if (ind_global >= kpar->size) return;
+
+    int i, j, k, ind_ijk, ind_ijm1k, ind_im1jk, ind_ijkm1;
+    double dHxdy, dHxdz, dHydx, dHydz, dHzdx, dHzdy, b_x, b_y, b_z;
+    int ind_pml, ind_pml_param;
+    double b, C, kappa;
+    int srcind_src, srcind_size, srcind_size_offset;
+    double src_t;
+
+    i = ind_global/(kpar->J*kpar->K);
+    j = (ind_global%(kpar->J*kpar->K))/kpar->K;
+    k = (ind_global%(kpar->J*kpar->K))%kpar->K;
+
+    if(kpar->K<kpar->Nx && kpar->k0!=0 && k==0) return;
+    if(kpar->K<kpar->Nx && kpar->k0+kpar->K!=kpar->Nx && k==kpar->K-1) return;
+    if(kpar->J<kpar->Ny && kpar->j0!=0 && j==0) return;
+    if(kpar->J<kpar->Ny && kpar->j0+kpar->J!=kpar->Ny && j==kpar->J-1) return;
+    if(kpar->I<kpar->Nz && kpar->i0!=0 && i==0) return;
+    if(kpar->I<kpar->Nz && kpar->i0+kpar->I!=kpar->Nz && i==kpar->I-1) return;
+
+    ind_ijk = (i+1)*(kpar->J+2)*(kpar->K+2) + (j+1)*(kpar->K+2) + k + 1;
+    ind_ijm1k = ind_ijk - kpar->K - 2;
+    ind_im1jk = ind_ijk - (kpar->J+2)*(kpar->K+2);
+    ind_ijkm1 = ind_ijk - 1;
+
+    // set up fields on the boundary
+    if(kpar->k0==0 && k==0){
+        if(kpar->bc[0]=='0'){
+            kpar->Hy[ind_ijk-1] = 0.0;
+            kpar->Hz[ind_ijk-1] = 0.0;
+        }
+        else if(kpar->bc[0]=='E'){
+            kpar->Hy[ind_ijk-1] = -1.0*kpar->Hy[ind_ijk];
+            kpar->Hz[ind_ijk-1] = -1.0*kpar->Hz[ind_ijk];
+        }
+        else if(kpar->bc[0]=='H'){
+            kpar->Hy[ind_ijk-1] = kpar->Hy[ind_ijk];
+            kpar->Hz[ind_ijk-1] = kpar->Hz[ind_ijk];
+        }
+    }
+    if(kpar->j0==0 && j==0){
+        if(kpar->bc[1]=='0'){
+            kpar->Hx[ind_ijk-kpar->K-2] = 0.0;
+            kpar->Hz[ind_ijk-kpar->K-2] = 0.0;
+        }
+        else if(kpar->bc[1]=='E'){
+            kpar->Hx[ind_ijk-kpar->K-2] = -1.0*kpar->Hx[ind_ijk];
+            kpar->Hz[ind_ijk-kpar->K-2] = -1.0*kpar->Hz[ind_ijk];
+        }
+        else if(kpar->bc[1]=='H'){
+            kpar->Hx[ind_ijk-kpar->K-2] = kpar->Hx[ind_ijk];
+            kpar->Hz[ind_ijk-kpar->K-2] = kpar->Hz[ind_ijk];
+        }
+    }
+    if(kpar->i0==0 && i==0){
+        if(kpar->bc[2]=='0'){
+            kpar->Hx[ind_ijk-(kpar->J+2)*(kpar->K+2)] = 0.0;
+            kpar->Hy[ind_ijk-(kpar->J+2)*(kpar->K+2)] = 0.0;
+        }
+        else if(kpar->bc[2]=='E'){
+            kpar->Hx[ind_ijk-(kpar->J+2)*(kpar->K+2)] = -1.0*kpar->Hx[ind_ijk];
+            kpar->Hy[ind_ijk-(kpar->J+2)*(kpar->K+2)] = -1.0*kpar->Hy[ind_ijk];
+        }
+        else if(kpar->bc[2]=='H'){
+            kpar->Hx[ind_ijk-(kpar->J+2)*(kpar->K+2)] = kpar->Hx[ind_ijk];
+            kpar->Hy[ind_ijk-(kpar->J+2)*(kpar->K+2)] = kpar->Hy[ind_ijk];
+        }
+    }
+
+    // update fields
+    b_x = kpar->dt/kpar->epsx[ind_global].real;
+    b_y = kpar->dt/kpar->epsy[ind_global].real;
+    b_z = kpar->dt/kpar->epsz[ind_global].real;
+    dHzdy = kpar->odx * (kpar->Hz[ind_ijk] - kpar->Hz[ind_ijm1k]);
+    dHydz = kpar->odx * (kpar->Hy[ind_ijk] - kpar->Hy[ind_im1jk]);
+    dHxdz = kpar->odx * (kpar->Hx[ind_ijk] - kpar->Hx[ind_im1jk]);
+    dHzdx = kpar->odx * (kpar->Hz[ind_ijk] - kpar->Hz[ind_ijkm1]);
+    dHydx = kpar->odx * (kpar->Hy[ind_ijk] - kpar->Hy[ind_ijkm1]);
+    dHxdy = kpar->odx * (kpar->Hx[ind_ijk] - kpar->Hx[ind_ijm1k]);
+    kpar->Ex[ind_ijk] = kpar->Ex[ind_ijk] + b_x * (dHzdy - dHydz);
+    kpar->Ey[ind_ijk] = kpar->Ey[ind_ijk] + b_y * (dHxdz - dHzdx);
+    kpar->Ez[ind_ijk] = kpar->Ez[ind_ijk] + b_z * (dHydx - dHxdy);
+
+    // Update PML
+    if (k + kpar->k0 < kpar->pml_xmin){
+        ind_pml = i * kpar->J * (kpar->pml_xmin - kpar->k0) + j * (kpar->pml_xmin - kpar->k0) + k;
+        ind_pml_param = kpar->pml_xmin - k - kpar->k0 - 1;
+        kappa = kpar->kappa_E_x[ind_pml_param];
+        b = kpar->bEx[ind_pml_param];
+        C = kpar->cEx[ind_pml_param];
+        kpar->pml_Hyx0[ind_pml] = C * dHydx + b * kpar->pml_Hyx0[ind_pml];
+        kpar->pml_Hzx0[ind_pml] = C * dHzdx + b * kpar->pml_Hzx0[ind_pml];
+        kpar->Ez[ind_ijk] = kpar->Ez[ind_ijk] + b_z * (kpar->pml_Hyx0[ind_pml] - dHydx + dHydx / kappa);
+        kpar->Ey[ind_ijk] = kpar->Ey[ind_ijk] - b_y * (kpar->pml_Hzx0[ind_pml] - dHzdx + dHzdx / kappa);
+    }
+    else if(k + kpar->k0 >= kpar->pml_xmax){
+        ind_pml = i * kpar->J * (kpar->k0 + kpar->K - kpar->pml_xmax) + j * (kpar->k0 + kpar->K - kpar->pml_xmax)
+                + k + kpar->k0 - kpar->pml_xmax;
+        ind_pml_param = k + kpar->k0 - kpar->pml_xmax + kpar->w_pml_x0;
+        kappa = kpar->kappa_E_x[ind_pml_param];
+        b = kpar->bEx[ind_pml_param];
+        C = kpar->cEx[ind_pml_param];
+        kpar->pml_Hyx1[ind_pml] = C * dHydx + b * kpar->pml_Hyx1[ind_pml];
+        kpar->pml_Hzx1[ind_pml] = C * dHzdx + b * kpar->pml_Hzx1[ind_pml];
+        kpar->Ez[ind_ijk] = kpar->Ez[ind_ijk] + b_z * (kpar->pml_Hyx1[ind_pml] - dHydx + dHydx / kappa);
+        kpar->Ey[ind_ijk] = kpar->Ey[ind_ijk] - b_y * (kpar->pml_Hzx1[ind_pml] - dHzdx + dHzdx / kappa);
+    }
+
+    if (j + kpar->j0 < kpar->pml_ymin){
+        ind_pml = i * (kpar->pml_ymin - kpar->j0) * kpar->K + j * kpar->K + k;
+        ind_pml_param = kpar->pml_ymin - j - kpar->j0 - 1;
+        kappa = kpar->kappa_E_y[ind_pml_param];
+        b = kpar->bEy[ind_pml_param];
+        C = kpar->cEy[ind_pml_param];
+        kpar->pml_Hxy0[ind_pml] = C * dHxdy + b * kpar->pml_Hxy0[ind_pml];
+        kpar->pml_Hzy0[ind_pml] = C * dHzdy + b * kpar->pml_Hzy0[ind_pml];
+        kpar->Ez[ind_ijk] = kpar->Ez[ind_ijk] - b_z * (kpar->pml_Hxy0[ind_pml] - dHxdy + dHxdy / kappa);
+        kpar->Ex[ind_ijk] = kpar->Ex[ind_ijk] + b_x * (kpar->pml_Hzy0[ind_pml] - dHzdy + dHzdy / kappa);
+    }
+    else if(j + kpar->j0 >= kpar->pml_ymax){
+        ind_pml = i * (kpar->j0 + kpar->J - kpar->pml_ymax) * kpar->K + (kpar->j0 + j - kpar->pml_ymax) * kpar->K + k;
+        ind_pml_param = j + kpar->j0 - kpar->pml_ymax + kpar->w_pml_y0;
+        kappa = kpar->kappa_E_y[ind_pml_param];
+        b = kpar->bEy[ind_pml_param];
+        C = kpar->cEy[ind_pml_param];
+        kpar->pml_Hxy1[ind_pml] = C * dHxdy + b * kpar->pml_Hxy1[ind_pml];
+        kpar->pml_Hzy1[ind_pml] = C * dHzdy + b * kpar->pml_Hzy1[ind_pml];
+        kpar->Ez[ind_ijk] = kpar->Ez[ind_ijk] - b_z * (kpar->pml_Hxy1[ind_pml] - dHxdy + dHxdy / kappa);
+        kpar->Ex[ind_ijk] = kpar->Ex[ind_ijk] + b_x * (kpar->pml_Hzy1[ind_pml] - dHzdy + dHzdy / kappa);
+    }
+
+    if (i + kpar->i0 < kpar->pml_zmin){
+        ind_pml = i * kpar->J * kpar->K + j * kpar->K + k;
+        ind_pml_param = kpar->pml_zmin - i - kpar->i0 - 1;
+        kappa = kpar->kappa_E_z[ind_pml_param];
+        b = kpar->bEz[ind_pml_param];
+        C = kpar->cEz[ind_pml_param];
+        kpar->pml_Hxz0[ind_pml] = C * dHxdz + b * kpar->pml_Hxz0[ind_pml];
+        kpar->pml_Hyz0[ind_pml] = C * dHydz + b * kpar->pml_Hyz0[ind_pml];
+        kpar->Ex[ind_ijk] = kpar->Ex[ind_ijk] - b_x * (kpar->pml_Hyz0[ind_pml] - dHydz + dHydz / kappa);
+        kpar->Ey[ind_ijk] = kpar->Ey[ind_ijk] + b_y * (kpar->pml_Hxz0[ind_pml] - dHxdz + dHxdz / kappa);
+    }
+    else if(i + kpar->i0 > kpar->pml_zmax){
+        ind_pml = (kpar->i0 + i - kpar->pml_zmax) * kpar->J * kpar->K + j * kpar->K + k;
+        ind_pml_param = i + kpar->i0 - kpar->pml_zmax + kpar->w_pml_z0;
+        kappa = kpar->kappa_E_z[ind_pml_param];
+        b = kpar->bEz[ind_pml_param];
+        C = kpar->cEz[ind_pml_param];
+        kpar->pml_Hxz1[ind_pml] = C * dHxdz + b * kpar->pml_Hxz1[ind_pml];
+        kpar->pml_Hyz1[ind_pml] = C * dHydz + b * kpar->pml_Hyz1[ind_pml];
+        kpar->Ex[ind_ijk] = kpar->Ex[ind_ijk] - b_x * (kpar->pml_Hyz1[ind_pml] - dHydz + dHydz / kappa);
+        kpar->Ey[ind_ijk] = kpar->Ey[ind_ijk] + b_y * (kpar->pml_Hxz1[ind_pml] - dHxdz + dHxdz / kappa);
+    }
+
+    // update sources
+    srcind_size_offset = 0;
+    for(int ii = 0; ii < kpar->srclen; ii++){
+        srcind_size = kpar->Is[ii] * kpar->Js[ii] * kpar->Ks[ii];
+        if(i+kpar->i0 >= kpar->i0s[ii] && j+kpar->j0 >= kpar->j0s[ii] && k+kpar->k0 >= kpar->k0s[ii]
+           && i+kpar->i0 < kpar->i0s[ii]+kpar->Is[ii] && j+kpar->j0 < kpar->j0s[ii]+kpar->Js[ii] && k+kpar->k0 < kpar->k0s[ii]+kpar->Ks[ii]){
+            srcind_src = (i+kpar->i0-kpar->i0s[ii])*kpar->Js[ii]*kpar->Ks[ii] + (j+kpar->j0-kpar->j0s[ii])*kpar->Ks[ii] + k+kpar->k0- kpar->k0s[ii];
+            if (kpar->t <= kpar->src_T){
+                src_t = sin(kpar->t + kpar->Jx[srcind_src+srcind_size_offset].imag)*((1+kpar->src_min)*exp(-(kpar->t-kpar->src_T)*(kpar->t-kpar->src_T)/kpar->src_k)-kpar->src_min);
+                kpar->Ex[ind_ijk] = kpar->Ex[ind_ijk] - src_t*kpar->Jx[srcind_src+srcind_size_offset].real*kpar->dt/kpar->epsx[ind_global].real;
+                src_t = sin(kpar->t + kpar->Jy[srcind_src+srcind_size_offset].imag)*((1+kpar->src_min)*exp(-(kpar->t-kpar->src_T)*(kpar->t-kpar->src_T)/kpar->src_k)-kpar->src_min);
+                kpar->Ey[ind_ijk] = kpar->Ey[ind_ijk] - src_t*kpar->Jy[srcind_src+srcind_size_offset].real*kpar->dt/kpar->epsy[ind_global].real;
+                src_t = sin(kpar->t + kpar->Jz[srcind_src+srcind_size_offset].imag)*((1+kpar->src_min)*exp(-(kpar->t-kpar->src_T)*(kpar->t-kpar->src_T)/kpar->src_k)-kpar->src_min);
+                kpar->Ez[ind_ijk] = kpar->Ez[ind_ijk] - src_t*kpar->Jz[srcind_src+srcind_size_offset].real*kpar->dt/kpar->epsz[ind_global].real;
+            }
+            else{
+                src_t = sin(kpar->t + kpar->Jx[srcind_src+srcind_size_offset].imag);
+                kpar->Ex[ind_ijk] = kpar->Ex[ind_ijk] - src_t*kpar->Jx[srcind_src+srcind_size_offset].real*kpar->dt/kpar->epsx[ind_global].real;
+                src_t = sin(kpar->t + kpar->Jy[srcind_src+srcind_size_offset].imag);
+                kpar->Ey[ind_ijk] = kpar->Ey[ind_ijk] - src_t*kpar->Jy[srcind_src+srcind_size_offset].real*kpar->dt/kpar->epsy[ind_global].real;
+                src_t = sin(kpar->t + kpar->Jz[srcind_src+srcind_size_offset].imag);
+                kpar->Ez[ind_ijk] = kpar->Ez[ind_ijk] - src_t*kpar->Jz[srcind_src+srcind_size_offset].real*kpar->dt/kpar->epsz[ind_global].real;
+           }
+        }
+        srcind_size_offset += srcind_size;
+    }
+}
+
+__global__ void kernel_update_E_border(kernelpar *kpar)
+{
+//     1D grid of 1D blocks
+    size_t ind_global = blockIdx.x * blockDim.x + threadIdx.x;
+    if (ind_global >= kpar->buffer_size) return;
+
+    int i, j, k;
+    if(kpar->K < kpar->Nx){
+        i = (ind_global%(kpar->I*kpar->J))/kpar->J;
+        j = (ind_global%(kpar->I*kpar->J))%kpar->J;
+        if(kpar->k0==0){ k = kpar->K-1; }
+        else if(kpar->k0+kpar->K==kpar->Nx){ k=0; }
+        else{
+            k = (ind_global < kpar->I*kpar->J) ? 0 : kpar->K-1;
+        }
+    }
+    else if(kpar->J < kpar->Ny){
+        i = (ind_global%(kpar->I*kpar->K))/kpar->K;
+        k = (ind_global%(kpar->I*kpar->K))%kpar->K;
+        if(kpar->j0==0){ j = kpar->J-1; }
+        else if(kpar->j0+kpar->J==kpar->Ny){ j=0; }
+        else{
+            j = (ind_global < kpar->I*kpar->K) ? 0 : kpar->J-1;
+        }
+    }
+    else if(kpar->I < kpar->Nz){
+        j = (ind_global%(kpar->J*kpar->K))/kpar->K;
+        k = (ind_global%(kpar->J*kpar->K))%kpar->K;
+        if(kpar->i0==0){ i = kpar->I-1; }
+        else if(kpar->i0+kpar->I==kpar->Nz){ i=0; }
+        else{
+            i = (ind_global < kpar->J*kpar->K) ? 0 : kpar->I-1;
+        }
+    }
+    else{
+        return;
+    }
+    
+    int ind_ijk, ind_ijm1k, ind_im1jk, ind_ijkm1;
+    double dHxdy, dHxdz, dHydx, dHydz, dHzdx, dHzdy, b_x, b_y, b_z;
+    int ind_pml, ind_pml_param;
+    double b, C, kappa;
+    int srcind_src, srcind_size, srcind_size_offset;
+    double src_t;
+
+    ind_ijk = (i+1)*(kpar->J+2)*(kpar->K+2) + (j+1)*(kpar->K+2) + k + 1;
+    ind_ijm1k = ind_ijk - kpar->K - 2;
+    ind_im1jk = ind_ijk - (kpar->J+2)*(kpar->K+2);
+    ind_ijkm1 = ind_ijk - 1;
+
+    // set up fields on the boundary
+    if(kpar->k0==0 && k==0){
+        if(kpar->bc[0]=='0'){
+            kpar->Hy[ind_ijk-1] = 0.0;
+            kpar->Hz[ind_ijk-1] = 0.0;
+        }
+        else if(kpar->bc[0]=='E'){
+            kpar->Hy[ind_ijk-1] = -1.0*kpar->Hy[ind_ijk];
+            kpar->Hz[ind_ijk-1] = -1.0*kpar->Hz[ind_ijk];
+        }
+        else if(kpar->bc[0]=='H'){
+            kpar->Hy[ind_ijk-1] = kpar->Hy[ind_ijk];
+            kpar->Hz[ind_ijk-1] = kpar->Hz[ind_ijk];
+        }
+    }
+    if(kpar->j0==0 && j==0){
+        if(kpar->bc[1]=='0'){
+            kpar->Hx[ind_ijk-kpar->K-2] = 0.0;
+            kpar->Hz[ind_ijk-kpar->K-2] = 0.0;
+        }
+        else if(kpar->bc[1]=='E'){
+            kpar->Hx[ind_ijk-kpar->K-2] = -1.0*kpar->Hx[ind_ijk];
+            kpar->Hz[ind_ijk-kpar->K-2] = -1.0*kpar->Hz[ind_ijk];
+        }
+        else if(kpar->bc[1]=='H'){
+            kpar->Hx[ind_ijk-kpar->K-2] = kpar->Hx[ind_ijk];
+            kpar->Hz[ind_ijk-kpar->K-2] = kpar->Hz[ind_ijk];
+        }
+    }
+    if(kpar->i0==0 && i==0){
+        if(kpar->bc[2]=='0'){
+            kpar->Hx[ind_ijk-(kpar->J+2)*(kpar->K+2)] = 0.0;
+            kpar->Hy[ind_ijk-(kpar->J+2)*(kpar->K+2)] = 0.0;
+        }
+        else if(kpar->bc[2]=='E'){
+            kpar->Hx[ind_ijk-(kpar->J+2)*(kpar->K+2)] = -1.0*kpar->Hx[ind_ijk];
+            kpar->Hy[ind_ijk-(kpar->J+2)*(kpar->K+2)] = -1.0*kpar->Hy[ind_ijk];
+        }
+        else if(kpar->bc[2]=='H'){
+            kpar->Hx[ind_ijk-(kpar->J+2)*(kpar->K+2)] = kpar->Hx[ind_ijk];
+            kpar->Hy[ind_ijk-(kpar->J+2)*(kpar->K+2)] = kpar->Hy[ind_ijk];
+        }
+    }
+
+    // update fields
+    int ind_border = i*kpar->J*kpar->K + j*kpar->K + k;
+    b_x = kpar->dt/kpar->epsx[ind_border].real;
+    b_y = kpar->dt/kpar->epsy[ind_border].real;
+    b_z = kpar->dt/kpar->epsz[ind_border].real;
+    dHzdy = kpar->odx * (kpar->Hz[ind_ijk] - kpar->Hz[ind_ijm1k]);
+    dHydz = kpar->odx * (kpar->Hy[ind_ijk] - kpar->Hy[ind_im1jk]);
+    dHxdz = kpar->odx * (kpar->Hx[ind_ijk] - kpar->Hx[ind_im1jk]);
+    dHzdx = kpar->odx * (kpar->Hz[ind_ijk] - kpar->Hz[ind_ijkm1]);
+    dHydx = kpar->odx * (kpar->Hy[ind_ijk] - kpar->Hy[ind_ijkm1]);
+    dHxdy = kpar->odx * (kpar->Hx[ind_ijk] - kpar->Hx[ind_ijm1k]);
+    kpar->Ex[ind_ijk] = kpar->Ex[ind_ijk] + b_x * (dHzdy - dHydz);
+    kpar->Ey[ind_ijk] = kpar->Ey[ind_ijk] + b_y * (dHxdz - dHzdx);
+    kpar->Ez[ind_ijk] = kpar->Ez[ind_ijk] + b_z * (dHydx - dHxdy);
+
+    // Update PML
+    if (k + kpar->k0 < kpar->pml_xmin){
+        ind_pml = i * kpar->J * (kpar->pml_xmin - kpar->k0) + j * (kpar->pml_xmin - kpar->k0) + k;
+        ind_pml_param = kpar->pml_xmin - k - kpar->k0 - 1;
+        kappa = kpar->kappa_E_x[ind_pml_param];
+        b = kpar->bEx[ind_pml_param];
+        C = kpar->cEx[ind_pml_param];
+        kpar->pml_Hyx0[ind_pml] = C * dHydx + b * kpar->pml_Hyx0[ind_pml];
+        kpar->pml_Hzx0[ind_pml] = C * dHzdx + b * kpar->pml_Hzx0[ind_pml];
+        kpar->Ez[ind_ijk] = kpar->Ez[ind_ijk] + b_z * (kpar->pml_Hyx0[ind_pml] - dHydx + dHydx / kappa);
+        kpar->Ey[ind_ijk] = kpar->Ey[ind_ijk] - b_y * (kpar->pml_Hzx0[ind_pml] - dHzdx + dHzdx / kappa);
+    }
+    else if(k + kpar->k0 >= kpar->pml_xmax){
+        ind_pml = i * kpar->J * (kpar->k0 + kpar->K - kpar->pml_xmax) + j * (kpar->k0 + kpar->K - kpar->pml_xmax)
+                + k + kpar->k0 - kpar->pml_xmax;
+        ind_pml_param = k + kpar->k0 - kpar->pml_xmax + kpar->w_pml_x0;
+        kappa = kpar->kappa_E_x[ind_pml_param];
+        b = kpar->bEx[ind_pml_param];
+        C = kpar->cEx[ind_pml_param];
+        kpar->pml_Hyx1[ind_pml] = C * dHydx + b * kpar->pml_Hyx1[ind_pml];
+        kpar->pml_Hzx1[ind_pml] = C * dHzdx + b * kpar->pml_Hzx1[ind_pml];
+        kpar->Ez[ind_ijk] = kpar->Ez[ind_ijk] + b_z * (kpar->pml_Hyx1[ind_pml] - dHydx + dHydx / kappa);
+        kpar->Ey[ind_ijk] = kpar->Ey[ind_ijk] - b_y * (kpar->pml_Hzx1[ind_pml] - dHzdx + dHzdx / kappa);
+    }
+
+    if (j + kpar->j0 < kpar->pml_ymin){
+        ind_pml = i * (kpar->pml_ymin - kpar->j0) * kpar->K + j * kpar->K + k;
+        ind_pml_param = kpar->pml_ymin - j - kpar->j0 - 1;
+        kappa = kpar->kappa_E_y[ind_pml_param];
+        b = kpar->bEy[ind_pml_param];
+        C = kpar->cEy[ind_pml_param];
+        kpar->pml_Hxy0[ind_pml] = C * dHxdy + b * kpar->pml_Hxy0[ind_pml];
+        kpar->pml_Hzy0[ind_pml] = C * dHzdy + b * kpar->pml_Hzy0[ind_pml];
+        kpar->Ez[ind_ijk] = kpar->Ez[ind_ijk] - b_z * (kpar->pml_Hxy0[ind_pml] - dHxdy + dHxdy / kappa);
+        kpar->Ex[ind_ijk] = kpar->Ex[ind_ijk] + b_x * (kpar->pml_Hzy0[ind_pml] - dHzdy + dHzdy / kappa);
+    }
+    else if(j + kpar->j0 >= kpar->pml_ymax){
+        ind_pml = i * (kpar->j0 + kpar->J - kpar->pml_ymax) * kpar->K + (kpar->j0 + j - kpar->pml_ymax) * kpar->K + k;
+        ind_pml_param = j + kpar->j0 - kpar->pml_ymax + kpar->w_pml_y0;
+        kappa = kpar->kappa_E_y[ind_pml_param];
+        b = kpar->bEy[ind_pml_param];
+        C = kpar->cEy[ind_pml_param];
+        kpar->pml_Hxy1[ind_pml] = C * dHxdy + b * kpar->pml_Hxy1[ind_pml];
+        kpar->pml_Hzy1[ind_pml] = C * dHzdy + b * kpar->pml_Hzy1[ind_pml];
+        kpar->Ez[ind_ijk] = kpar->Ez[ind_ijk] - b_z * (kpar->pml_Hxy1[ind_pml] - dHxdy + dHxdy / kappa);
+        kpar->Ex[ind_ijk] = kpar->Ex[ind_ijk] + b_x * (kpar->pml_Hzy1[ind_pml] - dHzdy + dHzdy / kappa);
+    }
+
+    if (i + kpar->i0 < kpar->pml_zmin){
+        ind_pml = i * kpar->J * kpar->K + j * kpar->K + k;
+        ind_pml_param = kpar->pml_zmin - i - kpar->i0 - 1;
+        kappa = kpar->kappa_E_z[ind_pml_param];
+        b = kpar->bEz[ind_pml_param];
+        C = kpar->cEz[ind_pml_param];
+        kpar->pml_Hxz0[ind_pml] = C * dHxdz + b * kpar->pml_Hxz0[ind_pml];
+        kpar->pml_Hyz0[ind_pml] = C * dHydz + b * kpar->pml_Hyz0[ind_pml];
+        kpar->Ex[ind_ijk] = kpar->Ex[ind_ijk] - b_x * (kpar->pml_Hyz0[ind_pml] - dHydz + dHydz / kappa);
+        kpar->Ey[ind_ijk] = kpar->Ey[ind_ijk] + b_y * (kpar->pml_Hxz0[ind_pml] - dHxdz + dHxdz / kappa);
+    }
+    else if(i + kpar->i0 > kpar->pml_zmax){
+        ind_pml = (kpar->i0 + i - kpar->pml_zmax) * kpar->J * kpar->K + j * kpar->K + k;
+        ind_pml_param = i + kpar->i0 - kpar->pml_zmax + kpar->w_pml_z0;
+        kappa = kpar->kappa_E_z[ind_pml_param];
+        b = kpar->bEz[ind_pml_param];
+        C = kpar->cEz[ind_pml_param];
+        kpar->pml_Hxz1[ind_pml] = C * dHxdz + b * kpar->pml_Hxz1[ind_pml];
+        kpar->pml_Hyz1[ind_pml] = C * dHydz + b * kpar->pml_Hyz1[ind_pml];
+        kpar->Ex[ind_ijk] = kpar->Ex[ind_ijk] - b_x * (kpar->pml_Hyz1[ind_pml] - dHydz + dHydz / kappa);
+        kpar->Ey[ind_ijk] = kpar->Ey[ind_ijk] + b_y * (kpar->pml_Hxz1[ind_pml] - dHxdz + dHxdz / kappa);
+    }
+
+    // update sources
+    srcind_size_offset = 0;
+    for(int ii = 0; ii < kpar->srclen; ii++){
+        srcind_size = kpar->Is[ii] * kpar->Js[ii] * kpar->Ks[ii];
+        if(i+kpar->i0 >= kpar->i0s[ii] && j+kpar->j0 >= kpar->j0s[ii] && k+kpar->k0 >= kpar->k0s[ii]
+           && i+kpar->i0 < kpar->i0s[ii]+kpar->Is[ii] && j+kpar->j0 < kpar->j0s[ii]+kpar->Js[ii] && k+kpar->k0 < kpar->k0s[ii]+kpar->Ks[ii]){
+            srcind_src = (i+kpar->i0-kpar->i0s[ii])*kpar->Js[ii]*kpar->Ks[ii] + (j+kpar->j0-kpar->j0s[ii])*kpar->Ks[ii] + k+kpar->k0- kpar->k0s[ii];
+            if (kpar->t <= kpar->src_T){
+                src_t = sin(kpar->t + kpar->Jx[srcind_src+srcind_size_offset].imag)*((1+kpar->src_min)*exp(-(kpar->t-kpar->src_T)*(kpar->t-kpar->src_T)/kpar->src_k)-kpar->src_min);
+                kpar->Ex[ind_ijk] = kpar->Ex[ind_ijk] - src_t*kpar->Jx[srcind_src+srcind_size_offset].real*kpar->dt/kpar->epsx[ind_border].real;
+                src_t = sin(kpar->t + kpar->Jy[srcind_src+srcind_size_offset].imag)*((1+kpar->src_min)*exp(-(kpar->t-kpar->src_T)*(kpar->t-kpar->src_T)/kpar->src_k)-kpar->src_min);
+                kpar->Ey[ind_ijk] = kpar->Ey[ind_ijk] - src_t*kpar->Jy[srcind_src+srcind_size_offset].real*kpar->dt/kpar->epsy[ind_border].real;
+                src_t = sin(kpar->t + kpar->Jz[srcind_src+srcind_size_offset].imag)*((1+kpar->src_min)*exp(-(kpar->t-kpar->src_T)*(kpar->t-kpar->src_T)/kpar->src_k)-kpar->src_min);
+                kpar->Ez[ind_ijk] = kpar->Ez[ind_ijk] - src_t*kpar->Jz[srcind_src+srcind_size_offset].real*kpar->dt/kpar->epsz[ind_border].real;
+            }
+            else{
+                src_t = sin(kpar->t + kpar->Jx[srcind_src+srcind_size_offset].imag);
+                kpar->Ex[ind_ijk] = kpar->Ex[ind_ijk] - src_t*kpar->Jx[srcind_src+srcind_size_offset].real*kpar->dt/kpar->epsx[ind_border].real;
+                src_t = sin(kpar->t + kpar->Jy[srcind_src+srcind_size_offset].imag);
+                kpar->Ey[ind_ijk] = kpar->Ey[ind_ijk] - src_t*kpar->Jy[srcind_src+srcind_size_offset].real*kpar->dt/kpar->epsy[ind_border].real;
+                src_t = sin(kpar->t + kpar->Jz[srcind_src+srcind_size_offset].imag);
+                kpar->Ez[ind_ijk] = kpar->Ez[ind_ijk] - src_t*kpar->Jz[srcind_src+srcind_size_offset].real*kpar->dt/kpar->epsz[ind_border].real;
+           }
+        }
+        srcind_size_offset += srcind_size;
+    }
+
+    // store left ghost layers
+    if(kpar->K<kpar->Nx && kpar->k0!=0 && k==0){
+        kpar->E_ghostleft[(i-kpar->i0)*kpar->J+j-kpar->j0+kpar->I*kpar->J*0] = kpar->Ex[ind_ijk];
+        kpar->E_ghostleft[(i-kpar->i0)*kpar->J+j-kpar->j0+kpar->I*kpar->J*1] = kpar->Ey[ind_ijk];
+        kpar->E_ghostleft[(i-kpar->i0)*kpar->J+j-kpar->j0+kpar->I*kpar->J*2] = kpar->Ez[ind_ijk];
+    }
+    if(kpar->J<kpar->Ny && kpar->j0!=0 && j==0){
+        kpar->E_ghostleft[(i-kpar->i0)*kpar->K+k-kpar->k0+kpar->I*kpar->K*0] = kpar->Ex[ind_ijk];
+        kpar->E_ghostleft[(i-kpar->i0)*kpar->K+k-kpar->k0+kpar->I*kpar->K*1] = kpar->Ey[ind_ijk];
+        kpar->E_ghostleft[(i-kpar->i0)*kpar->K+k-kpar->k0+kpar->I*kpar->K*2] = kpar->Ez[ind_ijk];
+    }
+    if(kpar->I<kpar->Nz && kpar->i0!=0 && i==0){
+        kpar->E_ghostleft[(j-kpar->j0)*kpar->K+k-kpar->k0+kpar->J*kpar->K*0] = kpar->Ex[ind_ijk];
+        kpar->E_ghostleft[(j-kpar->j0)*kpar->K+k-kpar->k0+kpar->J*kpar->K*1] = kpar->Ey[ind_ijk];
+        kpar->E_ghostleft[(j-kpar->j0)*kpar->K+k-kpar->k0+kpar->J*kpar->K*2] = kpar->Ez[ind_ijk];
+    }
+    // store right ghost layers
+    if(kpar->K<kpar->Nx && kpar->k0+kpar->K!=kpar->Nx && k==kpar->K-1){
+        kpar->E_ghostright[(i-kpar->i0)*kpar->J+j-kpar->j0+kpar->I*kpar->J*0] = kpar->Ex[ind_ijk];
+        kpar->E_ghostright[(i-kpar->i0)*kpar->J+j-kpar->j0+kpar->I*kpar->J*1] = kpar->Ey[ind_ijk];
+        kpar->E_ghostright[(i-kpar->i0)*kpar->J+j-kpar->j0+kpar->I*kpar->J*2] = kpar->Ez[ind_ijk];
+    }
+    if(kpar->J<kpar->Ny && kpar->j0+kpar->J!=kpar->Ny && j==kpar->J-1){
+        kpar->E_ghostright[(i-kpar->i0)*kpar->K+k-kpar->k0+kpar->I*kpar->K*0] = kpar->Ex[ind_ijk];
+        kpar->E_ghostright[(i-kpar->i0)*kpar->K+k-kpar->k0+kpar->I*kpar->K*1] = kpar->Ey[ind_ijk];
+        kpar->E_ghostright[(i-kpar->i0)*kpar->K+k-kpar->k0+kpar->I*kpar->K*2] = kpar->Ez[ind_ijk];
+    }
+    if(kpar->I<kpar->Nz && kpar->i0+kpar->I!=kpar->Nz && i==kpar->I-1){
+        kpar->E_ghostright[(j-kpar->j0)*kpar->K+k-kpar->k0+kpar->J*kpar->K*0] = kpar->Ex[ind_ijk];
+        kpar->E_ghostright[(j-kpar->j0)*kpar->K+k-kpar->k0+kpar->J*kpar->K*1] = kpar->Ey[ind_ijk];
+        kpar->E_ghostright[(j-kpar->j0)*kpar->K+k-kpar->k0+kpar->J*kpar->K*2] = kpar->Ez[ind_ijk];
+    }
+}
+
 __global__ void kernel_calc_ydAx(size_t size, size_t Nx, size_t Ny, size_t Nz, size_t i0, size_t i1,
                 thrust::complex<double> *ydAx,
                 thrust::complex<double> *Ex_adj, thrust::complex<double> *Ey_adj, thrust::complex<double> *Ez_adj,
@@ -583,12 +1755,22 @@ void fdtd::FDTD::set_local_grid_perturb(int i1, int i2)
 {
     _i1 = i1; _i2 = i2;
 }
+
 void fdtd::FDTD::set_wavelength(double wavelength)
 {
     _wavelength = wavelength;
     _R = _wavelength/(2*M_PI);
 }
 
+void fdtd::FDTD::set_rtol(double rtol)
+{
+    _rtol = rtol;
+}
+
+void fdtd::FDTD::set_domain_decomposition(char domain_decomp)
+{
+    _domain_decomp = domain_decomp;
+}
 
 void fdtd::FDTD::set_dt(double dt)
 {
@@ -599,6 +1781,18 @@ void fdtd::FDTD::set_dt(double dt)
 void fdtd::FDTD::set_complex_eps(bool complex_eps)
 {
     _complex_eps = complex_eps;
+}
+
+void fdtd::FDTD::set_gpus_count(int gpus_count)
+{
+    gpuErrchk(cudaGetDeviceCount(&_Ngpus));
+    _gpus_count = (gpus_count<_Ngpus)?gpus_count:_Ngpus;
+    std::cout << "Use " << _gpus_count << " of " << _Ngpus << " available GPUs." << std::endl;
+}
+
+void fdtd::FDTD::set_Ncycle(double Ncycle)
+{
+    _Ncycle = Ncycle;
 }
 
 void fdtd::FDTD::copyCUDA_field_arrays()
@@ -653,6 +1847,7 @@ void fdtd::FDTD::block_CUDA_src_free()
     cudaFree(dMy);
     cudaFree(dMz);
 }
+
 void fdtd::FDTD::block_CUDA_src_malloc_memcpy()
 {
     // extract the list of tuples of the sources
@@ -724,9 +1919,312 @@ void fdtd::FDTD::block_CUDA_src_malloc_memcpy()
 
 }
 
+void fdtd::FDTD::block_CUDA_multigpu_init()
+{
+    // size and indices of subdomains
+    int It{}, Jt{}, Kt{}, i0t{}, j0t{}, k0t{};
+    int N{0};
+    int Npmlx = _w_pml_x0 + _w_pml_x1,
+        Npmly = _w_pml_y0 + _w_pml_y1,
+        Npmlz = _w_pml_z0 + _w_pml_z1;
+    int pml_xmin = _w_pml_x0, pml_xmax = _Nx-_w_pml_x1,
+        pml_ymin = _w_pml_y0, pml_ymax = _Ny-_w_pml_y1,
+        pml_zmin = _w_pml_z0, pml_zmax = _Nz-_w_pml_z1;
+
+    _i0s = (int *)malloc(_srclen*sizeof(int));
+    _j0s = (int *)malloc(_srclen*sizeof(int));
+    _k0s = (int *)malloc(_srclen*sizeof(int));
+    _Is = (int *)malloc(_srclen*sizeof(int));
+    _Js = (int *)malloc(_srclen*sizeof(int));
+    _Ks = (int *)malloc(_srclen*sizeof(int));
+    size_t srcsize=0, size_offset=0, sizeall=0;
+    for(int i=0; i<_srclen; i++){
+        _i0s[i] = _sources[i].i0;
+        _j0s[i] = _sources[i].j0;
+        _k0s[i] = _sources[i].k0;
+        _Is[i] = _sources[i].I;
+        _Js[i] = _sources[i].J;
+        _Ks[i] = _sources[i].K;
+        sizeall += _Is[i] * _Js[i] * _Ks[i];
+    }
+
+    _kpar_list.reserve(_gpus_count);
+    _kpar_list_host = new kernelpar*[_gpus_count];
+    for(int device_id=0; device_id<_gpus_count; device_id++)
+    {
+        // create kpar for each device
+        gpuErrchk(cudaSetDevice(device_id));
+        _kpar_host = (kernelpar *)malloc(sizeof(kernelpar));
+        gpuErrchk(cudaMalloc((void **)&_kpar_device, sizeof(kernelpar)));
+        _kpar_list.push_back(_kpar_device);
+
+        // BCs
+        gpuErrchk(cudaMalloc((void **)&dbc, 3 * sizeof(char)));
+        gpuErrchk(cudaMemcpy(dbc, _bc, 3 * sizeof(char), cudaMemcpyHostToDevice));
+        _kpar_host->bc = dbc;
+
+        // Domain decomposition
+        switch(_domain_decomp){
+            case 'x':
+                i0t = _i0; j0t = _j0; k0t = device_id*_Nx/_gpus_count;
+                It = _I; Jt = _J; Kt = (device_id==_gpus_count-1)?_Nx-device_id*_Nx/_gpus_count:(device_id+1)*_Nx/_gpus_count-device_id*_Nx/_gpus_count;
+                _ghost_size = _I*_J; _buffer_size = (k0t==0 || k0t+Kt==_Nx)?_I*_J:2*_I*_J;
+                break;
+            case 'y':
+                i0t = _i0; j0t = device_id*_Ny/_gpus_count; k0t = _k0;
+                It = _I; Jt = (device_id==_gpus_count-1)?_Ny-device_id*_Ny/_gpus_count:(device_id+1)*_Ny/_gpus_count-device_id*_Ny/_gpus_count; Kt = _K;
+                _ghost_size = _I*_K; _buffer_size = (j0t==0 || j0t+Jt==_Ny)?_I*_K:2*_I*_K;
+                break;
+            case 'z':
+                i0t = device_id*_Nz/_gpus_count; j0t = _j0; k0t = _k0;
+                It = (device_id==_gpus_count-1)?_Nz-device_id*_Nz/_gpus_count:(device_id+1)*_Nz/_gpus_count-device_id*_Nz/_gpus_count; Jt = _J; Kt = _K;
+                _ghost_size = _J*_K; _buffer_size = (i0t==0 || i0t+It==_Nz)?_J*_K:2*_J*_K;
+                break;
+            default:
+                std::cout << "Unsupported domain decomposition method.  Default to X-cut." << std::endl;
+                i0t = _i0; j0t = _j0; k0t = device_id*_Nx/_gpus_count;
+                It = _I; Jt = _J; Kt = (device_id==_gpus_count-1)?_Nx-device_id*_Nx/_gpus_count:(device_id+1)*_Nx/_gpus_count-device_id*_Nx/_gpus_count;
+                _ghost_size = _I*_J; _buffer_size = (k0t==0 || k0t+Kt==_Nx)?_I*_J:2*_I*_J;
+                break;
+        }
+        _ghostsize_list.push_back(_ghost_size);
+        _buffersize_list.push_back(_buffer_size);
+
+        _kpar_host->I = It; _kpar_host->J = Jt; _kpar_host->K = Kt;
+        _kpar_host->i0 = i0t; _kpar_host->j0 = j0t; _kpar_host->k0 = k0t;
+        _kpar_host->size = _kpar_host->I * _kpar_host->J * _kpar_host->K;
+        _kpar_host->odx = _R/_dx;
+        _kpar_host->ghost_size = _ghost_size;
+        _kpar_host->buffer_size = _buffer_size;
+
+        std::cout << "Device " << device_id << ", (I, i0)=(" << _kpar_host->I << ", " << _kpar_host->i0 << "), (J, j0)=(" 
+                << _kpar_host->J << ", " << _kpar_host->j0 << "), (K, k0)=(" << _kpar_host->K << ", " << _kpar_host->k0 << ")" << std::endl;
+
+        _griddim_list.push_back(ceil(_kpar_host->I*_kpar_host->J*_kpar_host->K/(double)(blockdim)));
+        _griddimghost_list.push_back(ceil(_kpar_host->buffer_size/(double)(blockdim)));
+
+        _kpar_host->Nx = _Nx; _kpar_host->Ny = _Ny; _kpar_host->Nz = _Nz;
+        _kpar_host->dt = _dt; 
+
+        // fields
+        size_t field_len = (_kpar_host->I+2)*(_kpar_host->J+2)*(_kpar_host->K+2);
+        gpuErrchk(cudaMalloc((void **)&dEx, field_len * sizeof(double)));
+        gpuErrchk(cudaMalloc((void **)&dEy, field_len * sizeof(double)));
+        gpuErrchk(cudaMalloc((void **)&dEz, field_len * sizeof(double)));
+        gpuErrchk(cudaMalloc((void **)&dHx, field_len * sizeof(double)));
+        gpuErrchk(cudaMalloc((void **)&dHy, field_len * sizeof(double)));
+        gpuErrchk(cudaMalloc((void **)&dHz, field_len * sizeof(double)));
+
+        gpuErrchk(cudaMalloc((void **)&dE_bufferleft, 3*_ghost_size*sizeof(double)));
+        gpuErrchk(cudaMalloc((void **)&dE_bufferright, 3*_ghost_size*sizeof(double)));
+        gpuErrchk(cudaMalloc((void **)&dH_bufferleft, 3*_ghost_size*sizeof(double)));
+        gpuErrchk(cudaMalloc((void **)&dH_bufferright, 3*_ghost_size*sizeof(double)));
+        gpuErrchk(cudaMalloc((void **)&dE_ghostleft, 3*_ghost_size*sizeof(double)));
+        gpuErrchk(cudaMalloc((void **)&dE_ghostright, 3*_ghost_size*sizeof(double)));
+        gpuErrchk(cudaMalloc((void **)&dH_ghostleft, 3*_ghost_size*sizeof(double)));
+        gpuErrchk(cudaMalloc((void **)&dH_ghostright, 3*_ghost_size*sizeof(double)));
+
+        size_t blockSize = 256;
+        size_t numBlocks = ceil((field_len+blockSize-1)/(double)blockSize);
+        init_mat <<< numBlocks, blockSize >>> (dEx, field_len, 0.0);
+        init_mat <<< numBlocks, blockSize >>> (dEy, field_len, 0.0);
+        init_mat <<< numBlocks, blockSize >>> (dEz, field_len, 0.0);
+        init_mat <<< numBlocks, blockSize >>> (dHx, field_len, 0.0);
+        init_mat <<< numBlocks, blockSize >>> (dHy, field_len, 0.0);
+        init_mat <<< numBlocks, blockSize >>> (dHz, field_len, 0.0);
+
+        _kpar_host->E_bufferleft = dE_bufferleft; 
+        _kpar_host->E_bufferright = dE_bufferright;
+        _kpar_host->H_bufferleft = dH_bufferleft;
+        _kpar_host->H_bufferright = dH_bufferright;
+        _kpar_host->E_ghostleft = dE_ghostleft;
+        _kpar_host->E_ghostright = dE_ghostright;
+        _kpar_host->H_ghostleft = dH_ghostleft;
+        _kpar_host->H_ghostright = dH_ghostright;
+
+        _kpar_host->Ex = dEx; _kpar_host->Ey = dEy; _kpar_host->Ez = dEz;
+        _kpar_host->Hx = dHx; _kpar_host->Hy = dHy; _kpar_host->Hz = dHz;
+
+        // materials
+        size_t mat_len = _kpar_host->I*_kpar_host->J*_kpar_host->K;
+        gpuErrchk(cudaMalloc((void **)&depsx, mat_len*sizeof(complex128)));
+        gpuErrchk(cudaMalloc((void **)&depsy, mat_len*sizeof(complex128)));
+        gpuErrchk(cudaMalloc((void **)&depsz, mat_len*sizeof(complex128)));
+        gpuErrchk(cudaMalloc((void **)&depsx_full, _Nx*_Ny*_Nz*sizeof(complex128)));
+        gpuErrchk(cudaMalloc((void **)&depsy_full, _Nx*_Ny*_Nz*sizeof(complex128)));
+        gpuErrchk(cudaMalloc((void **)&depsz_full, _Nx*_Ny*_Nz*sizeof(complex128)));
+        gpuErrchk(cudaMemcpy(depsx_full, _eps_x, _Nx*_Ny*_Nz*sizeof(complex128), cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpy(depsy_full, _eps_y, _Nx*_Ny*_Nz*sizeof(complex128), cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpy(depsz_full, _eps_z, _Nx*_Ny*_Nz*sizeof(complex128), cudaMemcpyHostToDevice));
+
+        _kpar_host->epsx = depsx; _kpar_host->epsy = depsy; _kpar_host->epsz = depsz;
+        _kpar_host->epsx_full = depsx_full; _kpar_host->epsy_full = depsy_full; _kpar_host->epsz_full = depsz_full;
+        
+        gpuErrchk(cudaMemcpy(_kpar_list[device_id], _kpar_host, sizeof(kernelpar), cudaMemcpyHostToDevice));
+        numBlocks = ceil(mat_len/(double)blockSize);
+        kernel_copy_eps <<< numBlocks, blockSize >>> (_kpar_list[device_id]);
+
+        gpuErrchk(cudaFree(depsx_full)); gpuErrchk(cudaFree(depsy_full)); gpuErrchk(cudaFree(depsz_full));
+
+        // PML
+        if(k0t < _w_pml_x0){
+            N = _kpar_host->I * _kpar_host->J * (_w_pml_x0 - _kpar_host->k0);
+            gpuErrchk(cudaMalloc((void **)&dpml_Eyx0, N*sizeof(double)));
+            gpuErrchk(cudaMalloc((void **)&dpml_Ezx0, N*sizeof(double)));
+            gpuErrchk(cudaMalloc((void **)&dpml_Hyx0, N*sizeof(double)));
+            gpuErrchk(cudaMalloc((void **)&dpml_Hzx0, N*sizeof(double)));
+        }
+        if(k0t+Kt>_Nx-_w_pml_x1){
+            N = _kpar_host->I * _kpar_host->J * (_kpar_host->k0 + _kpar_host->K - (_Nx - _w_pml_x1));
+            gpuErrchk(cudaMalloc((void **)&dpml_Eyx1, N*sizeof(double)));
+            gpuErrchk(cudaMalloc((void **)&dpml_Ezx1, N*sizeof(double)));
+            gpuErrchk(cudaMalloc((void **)&dpml_Hyx1, N*sizeof(double)));
+            gpuErrchk(cudaMalloc((void **)&dpml_Hzx1, N*sizeof(double)));
+        }
+        if(j0t<_w_pml_y0){
+            N = _kpar_host->I * _kpar_host->K * (_w_pml_y0 - _kpar_host->j0);
+            gpuErrchk(cudaMalloc((void **)&dpml_Exy0, N*sizeof(double)));
+            gpuErrchk(cudaMalloc((void **)&dpml_Ezy0, N*sizeof(double)));
+            gpuErrchk(cudaMalloc((void **)&dpml_Hxy0, N*sizeof(double)));
+            gpuErrchk(cudaMalloc((void **)&dpml_Hzy0, N*sizeof(double)));
+        }
+        if(j0t+Jt>_Ny-_w_pml_y1){
+            N = _kpar_host->I * _kpar_host->K * (_kpar_host->j0 + _kpar_host->J - (_Ny - _w_pml_y1));
+            gpuErrchk(cudaMalloc((void **)&dpml_Exy1, N*sizeof(double)));
+            gpuErrchk(cudaMalloc((void **)&dpml_Ezy1, N*sizeof(double)));
+            gpuErrchk(cudaMalloc((void **)&dpml_Hxy1, N*sizeof(double)));
+            gpuErrchk(cudaMalloc((void **)&dpml_Hzy1, N*sizeof(double)));
+        }
+        if(i0t<_w_pml_z0){
+            N = _kpar_host->J * _kpar_host->K * (_w_pml_z0 - _kpar_host->i0);
+            gpuErrchk(cudaMalloc((void **)&dpml_Exz0, N*sizeof(double)));
+            gpuErrchk(cudaMalloc((void **)&dpml_Eyz0, N*sizeof(double)));
+            gpuErrchk(cudaMalloc((void **)&dpml_Hxz0, N*sizeof(double)));
+            gpuErrchk(cudaMalloc((void **)&dpml_Hyz0, N*sizeof(double)));
+        }
+        if(i0t+It>_Nz-_w_pml_z1){
+            N = _kpar_host->J * _kpar_host->K * (_kpar_host->i0 + _kpar_host->I - (_Nz - _w_pml_z1));
+            gpuErrchk(cudaMalloc((void **)&dpml_Exz1, N*sizeof(double)));
+            gpuErrchk(cudaMalloc((void **)&dpml_Eyz1, N*sizeof(double)));
+            gpuErrchk(cudaMalloc((void **)&dpml_Hxz1, N*sizeof(double)));
+            gpuErrchk(cudaMalloc((void **)&dpml_Hyz1, N*sizeof(double)));
+        }
+
+        gpuErrchk(cudaMalloc((void **)&dkappa_H_x, Npmlx*sizeof(double)));
+        gpuErrchk(cudaMalloc((void **)&dkappa_H_y, Npmly*sizeof(double)));
+        gpuErrchk(cudaMalloc((void **)&dkappa_H_z, Npmlz*sizeof(double)));
+        gpuErrchk(cudaMalloc((void **)&dkappa_E_x, Npmlx*sizeof(double)));
+        gpuErrchk(cudaMalloc((void **)&dkappa_E_y, Npmly*sizeof(double)));
+        gpuErrchk(cudaMalloc((void **)&dkappa_E_z, Npmlz*sizeof(double)));
+        gpuErrchk(cudaMalloc((void **)&dbHx, Npmlx*sizeof(double)));
+        gpuErrchk(cudaMalloc((void **)&dbHy, Npmly*sizeof(double)));
+        gpuErrchk(cudaMalloc((void **)&dbHz, Npmlz*sizeof(double)));
+        gpuErrchk(cudaMalloc((void **)&dbEx, Npmlx*sizeof(double)));
+        gpuErrchk(cudaMalloc((void **)&dbEy, Npmly*sizeof(double)));
+        gpuErrchk(cudaMalloc((void **)&dbEz, Npmlz*sizeof(double)));
+        gpuErrchk(cudaMalloc((void **)&dcHx, Npmlx*sizeof(double)));
+        gpuErrchk(cudaMalloc((void **)&dcHy, Npmly*sizeof(double)));
+        gpuErrchk(cudaMalloc((void **)&dcHz, Npmlz*sizeof(double)));
+        gpuErrchk(cudaMalloc((void **)&dcEx, Npmlx*sizeof(double)));
+        gpuErrchk(cudaMalloc((void **)&dcEy, Npmly*sizeof(double)));
+        gpuErrchk(cudaMalloc((void **)&dcEz, Npmlz*sizeof(double)));
+
+        gpuErrchk(cudaMemcpy(dkappa_H_x, _kappa_H_x, Npmlx*sizeof(double), cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpy(dkappa_H_y, _kappa_H_y, Npmly*sizeof(double), cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpy(dkappa_H_z, _kappa_H_z, Npmlz*sizeof(double), cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpy(dkappa_E_x, _kappa_E_x, Npmlx*sizeof(double), cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpy(dkappa_E_y, _kappa_E_y, Npmly*sizeof(double), cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpy(dkappa_E_z, _kappa_E_z, Npmlz*sizeof(double), cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpy(dbHx, _bHx, Npmlx*sizeof(double), cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpy(dbHy, _bHy, Npmly*sizeof(double), cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpy(dbHz, _bHz, Npmlz*sizeof(double), cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpy(dbEx, _bEx, Npmlx*sizeof(double), cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpy(dbEy, _bEy, Npmly*sizeof(double), cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpy(dbEz, _bEz, Npmlz*sizeof(double), cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpy(dcHx, _cHx, Npmlx*sizeof(double), cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpy(dcHy, _cHy, Npmly*sizeof(double), cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpy(dcHz, _cHz, Npmlz*sizeof(double), cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpy(dcEx, _cEx, Npmlx*sizeof(double), cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpy(dcEy, _cEy, Npmly*sizeof(double), cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpy(dcEz, _cEz, Npmlz*sizeof(double), cudaMemcpyHostToDevice));
+
+        _kpar_host->pml_Exy0 = dpml_Exy0; _kpar_host->pml_Exy1 = dpml_Exy1;
+        _kpar_host->pml_Exz0 = dpml_Exz0; _kpar_host->pml_Exz1 = dpml_Exz1;
+        _kpar_host->pml_Eyx0 = dpml_Eyx0; _kpar_host->pml_Eyx1 = dpml_Eyx1;
+        _kpar_host->pml_Eyz0 = dpml_Eyz0; _kpar_host->pml_Eyz1 = dpml_Eyz1;
+        _kpar_host->pml_Ezx0 = dpml_Ezx0; _kpar_host->pml_Ezx1 = dpml_Ezx1;
+        _kpar_host->pml_Ezy0 = dpml_Ezy0; _kpar_host->pml_Ezy1 = dpml_Ezy1;
+
+        _kpar_host->pml_Hxy0 = dpml_Hxy0; _kpar_host->pml_Hxy1 = dpml_Hxy1;
+        _kpar_host->pml_Hxz0 = dpml_Hxz0; _kpar_host->pml_Hxz1 = dpml_Hxz1;
+        _kpar_host->pml_Hyx0 = dpml_Hyx0; _kpar_host->pml_Hyx1 = dpml_Hyx1;
+        _kpar_host->pml_Hyz0 = dpml_Hyz0; _kpar_host->pml_Hyz1 = dpml_Hyz1;
+        _kpar_host->pml_Hzx0 = dpml_Hzx0; _kpar_host->pml_Hzx1 = dpml_Hzx1;
+        _kpar_host->pml_Hzy0 = dpml_Hzy0; _kpar_host->pml_Hzy1 = dpml_Hzy1;
+
+        _kpar_host->kappa_H_x = dkappa_H_x; _kpar_host->kappa_H_y = dkappa_H_y; _kpar_host->kappa_H_z = dkappa_H_z;
+        _kpar_host->kappa_E_x = dkappa_E_x; _kpar_host->kappa_E_y = dkappa_E_y; _kpar_host->kappa_E_z = dkappa_E_z;
+        _kpar_host->bHx = dbHx; _kpar_host->bHy = dbHy; _kpar_host->bHz = dbHz;
+        _kpar_host->bEx = dbEx; _kpar_host->bEy = dbEy; _kpar_host->bEz = dbEz;
+        _kpar_host->cHx = dcHx; _kpar_host->cHy = dcHy; _kpar_host->cHz = dcHz;
+        _kpar_host->cEx = dcEx; _kpar_host->cEy = dcEy; _kpar_host->cEz = dcEz;
+
+        _kpar_host->w_pml_x0 = _w_pml_x0; _kpar_host->w_pml_x1 = _w_pml_x1;
+        _kpar_host->w_pml_y0 = _w_pml_y0; _kpar_host->w_pml_y1 = _w_pml_y1;
+        _kpar_host->w_pml_z0 = _w_pml_z0; _kpar_host->w_pml_z1 = _w_pml_z1;
+        _kpar_host->pml_xmin = pml_xmin;  _kpar_host->pml_xmax = pml_xmax;
+        _kpar_host->pml_ymin = pml_ymin;  _kpar_host->pml_ymax = pml_ymax;
+        _kpar_host->pml_zmin = pml_zmin;  _kpar_host->pml_zmax = pml_zmax;
+
+        // sources
+        _kpar_host->srclen = _srclen;
+        gpuErrchk(cudaMalloc((void **)&dJx, sizeall * sizeof(complex128)));
+        gpuErrchk(cudaMalloc((void **)&dJy, sizeall * sizeof(complex128)));
+        gpuErrchk(cudaMalloc((void **)&dJz, sizeall * sizeof(complex128)));
+        gpuErrchk(cudaMalloc((void **)&dMx, sizeall * sizeof(complex128)));
+        gpuErrchk(cudaMalloc((void **)&dMy, sizeall * sizeof(complex128)));
+        gpuErrchk(cudaMalloc((void **)&dMz, sizeall * sizeof(complex128)));
+
+        gpuErrchk(cudaMalloc((void **)&di0s, _srclen * sizeof(complex128)));
+        gpuErrchk(cudaMalloc((void **)&dj0s, _srclen * sizeof(complex128)));
+        gpuErrchk(cudaMalloc((void **)&dk0s, _srclen * sizeof(complex128)));
+        gpuErrchk(cudaMalloc((void **)&dIs, _srclen * sizeof(complex128)));
+        gpuErrchk(cudaMalloc((void **)&dJs, _srclen * sizeof(complex128)));
+        gpuErrchk(cudaMalloc((void **)&dKs, _srclen * sizeof(complex128)));
+
+        gpuErrchk(cudaMemcpy(di0s, _i0s, _srclen * sizeof(int), cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpy(dj0s, _j0s, _srclen * sizeof(int), cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpy(dk0s, _k0s, _srclen * sizeof(int), cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpy(dIs, _Is, _srclen * sizeof(int), cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpy(dJs, _Js, _srclen * sizeof(int), cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpy(dKs, _Ks, _srclen * sizeof(int), cudaMemcpyHostToDevice));
+
+        size_offset = 0;
+        for(int i=0; i<_srclen;i++){
+            srcsize = _Is[i]*_Js[i]*_Ks[i];
+            gpuErrchk(cudaMemcpy(dJx+size_offset, _sources[i].Jx, srcsize * sizeof(complex128), cudaMemcpyHostToDevice));
+            gpuErrchk(cudaMemcpy(dJy+size_offset, _sources[i].Jy, srcsize * sizeof(complex128), cudaMemcpyHostToDevice));
+            gpuErrchk(cudaMemcpy(dJz+size_offset, _sources[i].Jz, srcsize * sizeof(complex128), cudaMemcpyHostToDevice));
+            gpuErrchk(cudaMemcpy(dMx+size_offset, _sources[i].Mx, srcsize * sizeof(complex128), cudaMemcpyHostToDevice));
+            gpuErrchk(cudaMemcpy(dMy+size_offset, _sources[i].My, srcsize * sizeof(complex128), cudaMemcpyHostToDevice));
+            gpuErrchk(cudaMemcpy(dMz+size_offset, _sources[i].Mz, srcsize * sizeof(complex128), cudaMemcpyHostToDevice));
+            size_offset += srcsize;
+        }
+
+        _kpar_host->i0s = di0s; _kpar_host->j0s = dj0s; _kpar_host->k0s = dk0s;
+        _kpar_host->Is = dIs; _kpar_host->Js = dJs; _kpar_host->Ks = dKs;
+        _kpar_host->Jx = dJx; _kpar_host->Jy = dJy; _kpar_host->Jz = dJz;
+        _kpar_host->Mx = dMx; _kpar_host->My = dMy; _kpar_host->Mz = dMz;
+        _kpar_host->src_T = _src_T; _kpar_host->src_min = _src_min; _kpar_host->src_k = _src_k;
+
+        gpuErrchk(cudaMemcpy(_kpar_list[device_id], _kpar_host, sizeof(kernelpar), cudaMemcpyHostToDevice));
+        _kpar_list_host[device_id] = _kpar_host;
+    }
+}
+
 void fdtd::FDTD::block_CUDA_malloc_memcpy()
 {
-    // BCs
+     // BCs
     gpuErrchk(cudaMalloc((void **)&dbc, 3 * sizeof(char)));
     gpuErrchk(cudaMemcpy(dbc, _bc, 3 * sizeof(char), cudaMemcpyHostToDevice));
     _kpar_host->bc = dbc;
@@ -953,29 +2451,6 @@ void fdtd::FDTD::block_CUDA_malloc_memcpy()
     _kpar_host->w_pml_z0 = _w_pml_z0;
     _kpar_host->w_pml_z1 = _w_pml_z1;
 
-//Test cudaMalloc and cudaMemcpy
-    //gpuErrchk(cudaMemcpy(_kpar_device,_kpar_host, sizeof(kernelpar), cudaMemcpyHostToDevice));
-    //kernel_test_pointer <<< ceil(size/256.0), 256 >>> (_kpar_device);
-    //cudaError_t cudaerr = cudaDeviceSynchronize();
-    //if (cudaerr != cudaSuccess)
-    //    printf("Set field: kernel launch status \"%s\".\n", cudaGetErrorString(cudaerr));
-    //gpuErrchk(cudaMemcpy(_Ex, _kpar_host->Ex, size * sizeof(double), cudaMemcpyDeviceToHost));
-    //printf("set field %d\n", _kpar_host->I);
-
-//Test cudaMalloc and cudaMemcpy
-    //kernel_test_double <<< ceil(size/256.0), 256 >>> (dEx, size);
-    //cudaError_t cudaerr = cudaDeviceSynchronize();
-    //if (cudaerr != cudaSuccess)
-    //    printf("Set field: kernel launch status \"%s\".\n", cudaGetErrorString(cudaerr));
-    //cudaMemcpy(Ex, dEx, size * sizeof(double), cudaMemcpyDeviceToHost);
-
-// Test passing param struct to kernel_update_H
-//     cudaMemcpy(_kpar_device,_kpar_host, sizeof(kernelpar), cudaMemcpyHostToDevice);
-//     kernel_update_H <<< ceil(size/256.0), 256 >>> (_kpar_device);
-//     cudaError_t cudaerr = cudaDeviceSynchronize();
-//     printf("Set field: kernel launch status \"%s\".\n", cudaGetErrorString(cudaerr));
-//     cudaMemcpy(Ex, dEx, size * sizeof(double), cudaMemcpyDeviceToHost);
-
 }
 
 void fdtd::FDTD::set_field_arrays(double *Ex, double *Ey, double *Ez,
@@ -1015,13 +2490,6 @@ void fdtd::FDTD::update_H(int n, double t)
     _kpar_host->src_min = _src_min;
     _kpar_host->src_k = _src_k;
 
-//     dim3 block(16,8);
-//     dim3 grid(ceil(_I*_J*_K/128.0/572.0), 572);
-
-//     printf("block dim: %d\n", blkdim);
-//     printf("grid dim: %d\n", blkdim/585);
-//     printf("grid length: %d\n", blkdim%585);
-
     gpuErrchk(cudaMemcpy(_kpar_device, _kpar_host, sizeof(kernelpar), cudaMemcpyHostToDevice));
     kernel_update_H <<< ceil(_I*_J*_K/128.0), 128 >>> (_kpar_device);
 //     kernel_update_H <<< grid, 128 >>> (_kpar_device);
@@ -1032,6 +2500,680 @@ void fdtd::FDTD::update_H(int n, double t)
 //     auto end3 = std::chrono::system_clock::now();
 //     std::chrono::duration<double> elapsed_src = end3-start3;
 //     std::cout << "Src:" << elapsed_src.count();
+}
+
+void fdtd::FDTD::set_GPUDirect()
+{
+    // Prepare NVLink
+    std::vector<std::thread> threads_nvlink;
+    threads_nvlink.reserve(_gpus_count);
+    for(int device_id=0; device_id<_gpus_count; device_id++)
+    {
+        threads_nvlink.emplace_back([=](){
+            try{ prepare_nvlink(device_id, _gpus_count); }
+            catch(std::runtime_error &error){ std::cerr << "Error in thread " << device_id << ":" << error.what() << std::endl; }
+        });
+    }
+    for(auto &thread: threads_nvlink)
+        thread.join();
+
+    if(_gpus_count>1) cudaP2PAssert(&_P2Pworking);
+    if(!_P2Pworking)
+        std::cout << "P2P not working. Fallback to host-to-device copy." << std::endl;
+}
+
+void fdtd::FDTD::solve()
+{
+    // Prepare streams and events
+    std::vector<cudaStream_t> compute_stream_list, sync_stream_list;
+    std::vector<cudaEvent_t> e_border_event_list, h_border_event_list, e_bulk_event_list, h_bulk_event_list, e_time_event_list, h_time_event_list;
+    compute_stream_list.reserve(_gpus_count);
+    sync_stream_list.reserve(_gpus_count);
+    e_border_event_list.reserve(_gpus_count);
+    h_border_event_list.reserve(_gpus_count);
+    e_bulk_event_list.reserve(_gpus_count);
+    h_bulk_event_list.reserve(_gpus_count);
+    e_time_event_list.reserve(_gpus_count);
+    h_time_event_list.reserve(_gpus_count);
+    int least_priority{}, greatest_priority{};
+    gpuErrchk(cudaDeviceGetStreamPriorityRange(&least_priority, &greatest_priority));
+    for(int device_id=0; device_id<_gpus_count; device_id++)
+    {
+        cudaSetDevice(device_id);
+        cudaStream_t compute_stream, sync_stream;
+        gpuErrchk(cudaStreamCreateWithPriority(&compute_stream, cudaStreamDefault, least_priority));
+        gpuErrchk(cudaStreamCreateWithPriority(&sync_stream, cudaStreamDefault, greatest_priority));
+        compute_stream_list.push_back(compute_stream);
+        sync_stream_list.push_back(sync_stream);
+
+        cudaEvent_t h_bulk_computed, e_bulk_computed, h_border_computed, e_border_computed, h_time_computed, e_time_computed;
+        gpuErrchk(cudaEventCreateWithFlags(&h_bulk_computed, cudaEventDisableTiming));
+        gpuErrchk(cudaEventCreateWithFlags(&e_bulk_computed, cudaEventDisableTiming));
+        gpuErrchk(cudaEventCreateWithFlags(&h_border_computed, cudaEventDisableTiming));
+        gpuErrchk(cudaEventCreateWithFlags(&e_border_computed, cudaEventDisableTiming));
+        gpuErrchk(cudaEventCreateWithFlags(&h_time_computed, cudaEventDisableTiming));
+        gpuErrchk(cudaEventCreateWithFlags(&e_time_computed, cudaEventDisableTiming));
+        h_bulk_event_list.push_back(h_bulk_computed);
+        e_bulk_event_list.push_back(e_bulk_computed);
+        h_border_event_list.push_back(h_border_computed);
+        e_border_event_list.push_back(e_border_computed);
+        h_time_event_list.push_back(h_time_computed);
+        e_time_event_list.push_back(e_time_computed);
+    }
+
+    // Prepare convergence check matrices
+    double *Ex0, *Ex1, *Ex2, *Ey0, *Ey1, *Ey2, *Ez0, *Ez1, *Ez2, *phi0, *phi1, *A0, *A1;
+    Ex0 = (double *)malloc(_Nconv*sizeof(double)); std::fill(Ex0, Ex0+_Nconv, 0.0);
+    Ex1 = (double *)malloc(_Nconv*sizeof(double)); std::fill(Ex1, Ex1+_Nconv, 0.0);
+    Ex2 = (double *)malloc(_Nconv*sizeof(double)); std::fill(Ex2, Ex2+_Nconv, 0.0);
+    Ey0 = (double *)malloc(_Nconv*sizeof(double)); std::fill(Ey0, Ey0+_Nconv, 0.0);
+    Ey1 = (double *)malloc(_Nconv*sizeof(double)); std::fill(Ey1, Ey1+_Nconv, 0.0);
+    Ey2 = (double *)malloc(_Nconv*sizeof(double)); std::fill(Ey2, Ey2+_Nconv, 0.0);
+    Ez0 = (double *)malloc(_Nconv*sizeof(double)); std::fill(Ez0, Ez0+_Nconv, 0.0);
+    Ez1 = (double *)malloc(_Nconv*sizeof(double)); std::fill(Ez1, Ez1+_Nconv, 0.0);
+    Ez2 = (double *)malloc(_Nconv*sizeof(double)); std::fill(Ez2, Ez2+_Nconv, 0.0);
+    phi0 = (double *)malloc(_Nconv*sizeof(double)); std::fill(phi0, phi0+_Nconv, 0.0);
+    phi1 = (double *)malloc(_Nconv*sizeof(double)); std::fill(phi1, phi1+_Nconv, 0.0);
+    A0 = (double *)malloc(_Nconv*sizeof(double)); std::fill(A0, A0+_Nconv, 0.0);
+    A1 = (double *)malloc(_Nconv*sizeof(double)); std::fill(A1, A1+_Nconv, 0.0);
+
+    // complex128 *epsxfull = (complex128 *)malloc(_Nx*_Ny*_Nz*sizeof(complex128));
+
+    // Prepare buffer matrices for device-to-device transfer 
+    std::vector<double *> Emid_list{};
+    Emid_list.reserve(_gpus_count);
+    for(int device_id=0; device_id<_gpus_count; device_id++){
+        double *Emid = (double *)malloc(3*_ghostsize_list[device_id]*sizeof(double));
+        std::fill(Emid, Emid+3*_ghostsize_list[device_id], 0.0);
+        Emid_list.push_back(Emid);
+    }
+
+    double *A_change = new double{1.0f};
+    double *phi_change = new double{1.0f};
+    int *Tn_factor = new int{64};
+    int Tn = int(_Ncycle*3/4);
+    double amp_rtol{_rtol}, phi_rtol{sqrt(_rtol)};
+
+    // FDTD iterations
+    std::vector<std::thread> threads_kernels;
+    threads_kernels.reserve(_gpus_count);
+    signal(SIGINT, signal_callback_handler);
+    for(int device_id=0; device_id<_gpus_count; device_id++)
+    {
+        threads_kernels.emplace_back([=](){
+            try{
+                gpuErrchk(cudaSetDevice(device_id));
+                int p{0}, conv_idx{0};
+                double t0{0.0f}, t1{0.0f}, t2{0.0f};
+                double phasex{0.0f}, phasey{0.0f}, phasez{0.0f}, ampx{0.0f}, ampy{0.0f}, ampz{0.0f};
+                int It, Jt, Kt, i0t, j0t, k0t, I, J, K;
+                int ci, cj, ck;
+                It = _kpar_list_host[device_id]->I; Jt = _kpar_list_host[device_id]->J; Kt = _kpar_list_host[device_id]->K;
+                i0t = _kpar_list_host[device_id]->i0; j0t = _kpar_list_host[device_id]->j0; k0t = _kpar_list_host[device_id]->k0;
+                I = _kpar_list_host[device_id]->Nz; J = _kpar_list_host[device_id]->Ny; K = _kpar_list_host[device_id]->Nx;
+                double *Ext, *Eyt, *Ezt, *Hxt, *Hyt, *Hzt;
+                Ext = (double *)malloc((It+2)*(Jt+2)*(Kt+2)*sizeof(double));
+                Eyt = (double *)malloc((It+2)*(Jt+2)*(Kt+2)*sizeof(double));
+                Ezt = (double *)malloc((It+2)*(Jt+2)*(Kt+2)*sizeof(double));
+                Hxt = (double *)malloc((It+2)*(Jt+2)*(Kt+2)*sizeof(double));
+                Hyt = (double *)malloc((It+2)*(Jt+2)*(Kt+2)*sizeof(double));
+                Hzt = (double *)malloc((It+2)*(Jt+2)*(Kt+2)*sizeof(double));
+
+                // complex128 *epsxt = (complex128 *)malloc(It*Jt*Kt*sizeof(complex128));
+
+                int step{0};
+                while(*A_change > amp_rtol || *phi_change > phi_rtol || std::isnan(*A_change) || std::isnan(*phi_change))
+                {
+                    _kpar_list_host[device_id]->t = step*_dt;
+                    gpuErrchk(cudaMemcpyAsync(_kpar_list[device_id], _kpar_list_host[device_id], sizeof(kernelpar), cudaMemcpyHostToDevice, compute_stream_list[device_id]));
+                    cudaEventRecord(h_time_event_list[device_id], compute_stream_list[device_id]);
+
+                    cudaStreamWaitEvent(compute_stream_list[device_id], h_time_event_list[device_id], 0);
+                    cudaStreamWaitEvent(compute_stream_list[device_id], e_border_event_list[device_id], 0);
+                    kernel_update_H_bulk <<< _griddim_list[device_id], blockdim, 0, compute_stream_list[device_id] >>> (_kpar_list[device_id]);
+                    cudaEventRecord(h_bulk_event_list[device_id], compute_stream_list[device_id]);
+
+                    cudaStreamWaitEvent(sync_stream_list[device_id], h_time_event_list[device_id], 0);
+                    cudaStreamWaitEvent(sync_stream_list[device_id], e_bulk_event_list[device_id], 0);
+                    cudaStreamWaitEvent(sync_stream_list[device_id], e_border_event_list[device_id], 0);
+                    kernel_update_H_border <<< _griddimghost_list[device_id], blockdim, 0, sync_stream_list[device_id] >>> (_kpar_list[device_id]);
+                    cudaEventRecord(h_border_event_list[device_id], sync_stream_list[device_id]);
+
+                    if(_gpus_count>1){
+                        Barrier(counter_H, mutex_H, cv_H, _gpus_count);
+                        if(device_id==0){
+                            cudaStreamWaitEvent(sync_stream_list[device_id], h_border_event_list[device_id+1], 0);
+                            if(_P2Pworking){
+                                gpuErrchk(cudaMemcpyPeerAsync(_kpar_list_host[device_id]->H_bufferright, device_id, _kpar_list_host[device_id+1]->H_ghostleft, device_id+1, 3*_ghostsize_list[device_id]*sizeof(double), sync_stream_list[device_id]));
+                            }else{
+                                gpuErrchk(cudaMemcpyAsync(Emid_list[device_id], _kpar_list_host[device_id+1]->H_ghostleft, 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyDeviceToHost, sync_stream_list[device_id]));
+                                gpuErrchk(cudaMemcpyAsync(_kpar_list_host[device_id]->H_bufferright, Emid_list[device_id], 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyHostToDevice, sync_stream_list[device_id]));
+                            }
+                        }
+                        else if(device_id==_gpus_count-1){
+                            cudaStreamWaitEvent(sync_stream_list[device_id], h_border_event_list[device_id-1], 0);
+                            if(_P2Pworking){
+                                gpuErrchk(cudaMemcpyPeerAsync(_kpar_list_host[device_id]->H_bufferleft, device_id, _kpar_list_host[device_id-1]->H_ghostright, device_id-1, 3*_ghostsize_list[device_id]*sizeof(double), sync_stream_list[device_id]));
+                            }else{
+                                gpuErrchk(cudaMemcpyAsync(Emid_list[device_id], _kpar_list_host[device_id-1]->H_ghostright, 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyDeviceToHost, sync_stream_list[device_id]));
+                                gpuErrchk(cudaMemcpyAsync(_kpar_list_host[device_id]->H_bufferleft, Emid_list[device_id], 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyHostToDevice, sync_stream_list[device_id]));
+                            }
+                        }
+                        else{
+                            cudaStreamWaitEvent(sync_stream_list[device_id], h_border_event_list[device_id+1], 0);
+                            cudaStreamWaitEvent(sync_stream_list[device_id], h_border_event_list[device_id-1], 0);
+                            if(_P2Pworking){
+                                gpuErrchk(cudaMemcpyPeerAsync(_kpar_list_host[device_id]->H_bufferright, device_id, _kpar_list_host[device_id+1]->H_ghostleft, device_id+1, 3*_ghostsize_list[device_id]*sizeof(double), sync_stream_list[device_id]));
+                                gpuErrchk(cudaMemcpyPeerAsync(_kpar_list_host[device_id]->H_bufferleft, device_id, _kpar_list_host[device_id-1]->H_ghostright, device_id-1, 3*_ghostsize_list[device_id]*sizeof(double), sync_stream_list[device_id]));
+                            }else{
+                                gpuErrchk(cudaMemcpyAsync(Emid_list[device_id], _kpar_list_host[device_id+1]->H_ghostleft, 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyDeviceToHost, sync_stream_list[device_id]));
+                                gpuErrchk(cudaMemcpyAsync(_kpar_list_host[device_id]->H_bufferright, Emid_list[device_id], 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyHostToDevice, sync_stream_list[device_id]));
+                                gpuErrchk(cudaMemcpyAsync(Emid_list[device_id], _kpar_list_host[device_id-1]->H_ghostright, 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyDeviceToHost, sync_stream_list[device_id]));
+                                gpuErrchk(cudaMemcpyAsync(_kpar_list_host[device_id]->H_bufferleft, Emid_list[device_id], 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyHostToDevice, sync_stream_list[device_id]));
+                            }
+                        }
+                        kernel_load_ghostlayerH <<< _griddimghost_list[device_id], blockdim, 0, sync_stream_list[device_id] >>> (_kpar_list[device_id]);
+                        cudaEventRecord(h_border_event_list[device_id], sync_stream_list[device_id]);
+                    }
+
+                    _kpar_list_host[device_id]->t = (step+0.5)*_dt;
+                    gpuErrchk(cudaMemcpyAsync(_kpar_list[device_id], _kpar_list_host[device_id], sizeof(kernelpar), cudaMemcpyHostToDevice, compute_stream_list[device_id]));
+                    cudaEventRecord(e_time_event_list[device_id], compute_stream_list[device_id]);
+
+                    cudaStreamWaitEvent(compute_stream_list[device_id], e_time_event_list[device_id], 0);
+                    cudaStreamWaitEvent(compute_stream_list[device_id], h_border_event_list[device_id], 0);
+                    kernel_update_E_bulk <<< _griddim_list[device_id], blockdim, 0, compute_stream_list[device_id] >>> (_kpar_list[device_id]);
+                    cudaEventRecord(e_bulk_event_list[device_id], compute_stream_list[device_id]);
+
+                    cudaStreamWaitEvent(sync_stream_list[device_id], e_time_event_list[device_id], 0);
+                    cudaStreamWaitEvent(sync_stream_list[device_id], h_bulk_event_list[device_id], 0);
+                    cudaStreamWaitEvent(sync_stream_list[device_id], h_border_event_list[device_id], 0);
+                    kernel_update_E_border <<< _griddimghost_list[device_id], blockdim, 0, sync_stream_list[device_id] >>> (_kpar_list[device_id]);
+                    cudaEventRecord(e_border_event_list[device_id], sync_stream_list[device_id]);
+                    
+                    if(_gpus_count>1){
+                        Barrier(counter_E, mutex_E, cv_E, _gpus_count);
+                        if(device_id==0){
+                            cudaStreamWaitEvent(sync_stream_list[device_id], e_border_event_list[device_id+1], 0);
+                            if(_P2Pworking){
+                                gpuErrchk(cudaMemcpyPeerAsync(_kpar_list_host[device_id]->E_bufferright, device_id, _kpar_list_host[device_id+1]->E_ghostleft, device_id+1, 3*_ghostsize_list[device_id]*sizeof(double), sync_stream_list[device_id]));
+                            }else{
+                                gpuErrchk(cudaMemcpyAsync(Emid_list[device_id], _kpar_list_host[device_id+1]->E_ghostleft, 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyDeviceToHost, sync_stream_list[device_id]));
+                                gpuErrchk(cudaMemcpyAsync(_kpar_list_host[device_id]->E_bufferright, Emid_list[device_id], 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyHostToDevice, sync_stream_list[device_id]));
+                            }
+                        }
+                        else if(device_id==_gpus_count-1){
+                            cudaStreamWaitEvent(sync_stream_list[device_id], e_border_event_list[device_id-1], 0);
+                            if(_P2Pworking){
+                                gpuErrchk(cudaMemcpyPeerAsync(_kpar_list_host[device_id]->E_bufferleft, device_id, _kpar_list_host[device_id-1]->E_ghostright, device_id-1, 3*_ghostsize_list[device_id]*sizeof(double), sync_stream_list[device_id]));
+                            }else{
+                                gpuErrchk(cudaMemcpyAsync(Emid_list[device_id], _kpar_list_host[device_id-1]->E_ghostright, 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyDeviceToHost, sync_stream_list[device_id]));
+                                gpuErrchk(cudaMemcpyAsync(_kpar_list_host[device_id]->E_bufferleft, Emid_list[device_id], 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyHostToDevice, sync_stream_list[device_id]));
+                            }
+                        }
+                        else{
+                            cudaStreamWaitEvent(sync_stream_list[device_id], e_border_event_list[device_id+1], 0);
+                            cudaStreamWaitEvent(sync_stream_list[device_id], e_border_event_list[device_id-1], 0);
+                            if(_P2Pworking){
+                                gpuErrchk(cudaMemcpyPeerAsync(_kpar_list_host[device_id]->E_bufferright, device_id, _kpar_list_host[device_id+1]->E_ghostleft, device_id+1, 3*_ghostsize_list[device_id]*sizeof(double), sync_stream_list[device_id]));
+                                gpuErrchk(cudaMemcpyPeerAsync(_kpar_list_host[device_id]->E_bufferleft, device_id, _kpar_list_host[device_id-1]->E_ghostright, device_id-1, 3*_ghostsize_list[device_id]*sizeof(double), sync_stream_list[device_id]));
+                            }else{
+                                gpuErrchk(cudaMemcpyAsync(Emid_list[device_id], _kpar_list_host[device_id+1]->E_ghostleft, 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyDeviceToHost, sync_stream_list[device_id]));
+                                gpuErrchk(cudaMemcpyAsync(_kpar_list_host[device_id]->E_bufferright, Emid_list[device_id], 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyHostToDevice, sync_stream_list[device_id]));
+                                gpuErrchk(cudaMemcpyAsync(Emid_list[device_id], _kpar_list_host[device_id-1]->E_ghostright, 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyDeviceToHost, sync_stream_list[device_id]));
+                                gpuErrchk(cudaMemcpyAsync(_kpar_list_host[device_id]->E_bufferleft, Emid_list[device_id], 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyHostToDevice, sync_stream_list[device_id]));
+                            }
+                        }
+                        kernel_load_ghostlayerE <<< _griddimghost_list[device_id], blockdim, 0, sync_stream_list[device_id] >>> (_kpar_list[device_id]);
+                        cudaEventRecord(e_border_event_list[device_id], sync_stream_list[device_id]);
+                    }
+                    
+                    if(p==Tn* (*Tn_factor)-1){
+                        p = 0; // reset counter
+                        t0=t1; t1=t2; t2= step*_dt;
+                        gpuErrchk(cudaMemcpy(Ext, _kpar_list_host[device_id]->Ex, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToHost));
+                        gpuErrchk(cudaMemcpy(Eyt, _kpar_list_host[device_id]->Ey, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToHost));
+                        gpuErrchk(cudaMemcpy(Ezt, _kpar_list_host[device_id]->Ez, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToHost));
+                        gpuErrchk(cudaMemcpy(Hxt, _kpar_list_host[device_id]->Hx, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToHost));
+                        gpuErrchk(cudaMemcpy(Hyt, _kpar_list_host[device_id]->Hy, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToHost));
+                        gpuErrchk(cudaMemcpy(Hzt, _kpar_list_host[device_id]->Hz, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToHost));
+
+                        // gpuErrchk(cudaMemcpy(epsxt, _kpar_list_host[device_id]->epsx, It*Jt*Kt*sizeof(complex128), cudaMemcpyDeviceToHost));
+                        gpuErrchk(cudaDeviceSynchronize());
+
+                        for(int ii=0; ii<_Nconv; ii++){
+                            conv_idx = ii * int(I*J*K/_Nconv);
+                            ci = conv_idx/(J*K);
+                            cj = (conv_idx%(J*K))/K;
+                            ck = (conv_idx%(J*K))%K;
+                            if(ci>=i0t && ci<i0t+It && cj>=j0t && cj<j0t+Jt && ck>=k0t && ck<k0t+Kt){
+                                A0[ii] = A1[ii];
+                                phi0[ii] = phi1[ii];
+                                Ex0[ii] = Ex1[ii];
+                                Ex1[ii] = Ex2[ii];
+                                Ex2[ii] = Ext[(ci-i0t+1)*(Jt+2)*(Kt+2)+(cj-j0t+1)*(Kt+2)+ck-k0t+1];
+                                Ey0[ii] = Ey1[ii];
+                                Ey1[ii] = Ey2[ii];
+                                Ey2[ii] = Eyt[(ci-i0t+1)*(Jt+2)*(Kt+2)+(cj-j0t+1)*(Kt+2)+ck-k0t+1];
+                                Ez0[ii] = Ez1[ii];
+                                Ez1[ii] = Ez2[ii];
+                                Ez2[ii] = Ezt[(ci-i0t+1)*(Jt+2)*(Kt+2)+(cj-j0t+1)*(Kt+2)+ck-k0t+1];
+
+                                phasex = calc_phase(t0, t1, t2, Ex0[ii], Ex1[ii], Ex2[ii]);
+                                phasey = calc_phase(t0, t1, t2, Ey0[ii], Ey1[ii], Ey2[ii]);
+                                phasez = calc_phase(t0, t1, t2, Ez0[ii], Ez1[ii], Ez2[ii]);
+                                ampx = calc_amplitude(t0, t1, t2, Ex0[ii], Ex1[ii], Ex2[ii], phasex);
+                                ampy = calc_amplitude(t0, t1, t2, Ey0[ii], Ey1[ii], Ey2[ii], phasey);
+                                ampz = calc_amplitude(t0, t1, t2, Ez0[ii], Ez1[ii], Ez2[ii], phasez);
+                                if(ampx<0){ ampx *= -1.0; phasex += M_PI; }
+                                if(ampy<0){ ampy *= -1.0; phasey += M_PI; }
+                                if(ampz<0){ ampz *= -1.0; phasez += M_PI; }
+                                phi1[ii] = phasex + phasey + phasez;
+                                A1[ii] = ampx + ampy + ampz;
+                            }
+                        }
+                        Barrier(counter_conv, mutex_conv, cv_conv, _gpus_count);
+
+                        // capture fields at 500th step
+                        // if(step==1000){
+                        //     // FDTD_capture_t0_fields
+                        //     for(int ii=0; ii<It; ii++){
+                        //         for(int jj=0; jj<Jt; jj++){
+                        //             for(int kk=0; kk<Kt; kk++){
+                        //                 _Ex_t0[(ii+i0t)*J*K+(jj+j0t)*K+kk+k0t] = Ext[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+kk+1];
+                        //                 _Ey_t0[(ii+i0t)*J*K+(jj+j0t)*K+kk+k0t] = Eyt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+kk+1];
+                        //                 _Ez_t0[(ii+i0t)*J*K+(jj+j0t)*K+kk+k0t] = Ezt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+kk+1];
+                        //                 _Hx_t0[(ii+i0t)*J*K+(jj+j0t)*K+kk+k0t] = Hxt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+kk+1];
+                        //                 _Hy_t0[(ii+i0t)*J*K+(jj+j0t)*K+kk+k0t] = Hyt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+kk+1];
+                        //                 _Hz_t0[(ii+i0t)*J*K+(jj+j0t)*K+kk+k0t] = Hzt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+kk+1];
+
+                        //                 // epsxfull[(ii+i0t)*J*K+(jj+j0t)*K+kk+k0t] = epsxt[ii*Jt*Kt+jj*Kt+kk];
+                        //             }
+                        //         }
+                        //     } // FDTD_capture_t0_fields end
+                        //     if(device_id==0){
+                        //         std::ofstream out("field_slice.csv");
+                        //         out << "Ex,j,k" << '\n';
+                        //         for(int ii=37; ii<37+1; ii++){
+                        //             for(int jj=0; jj<J; jj++){
+                        //                 for(int kk=0; kk<K; kk++){
+                        //                     out << _Ex_t0[ii*J*K+jj*K+kk].real << ',' << jj << ',' << kk << '\n';
+                        //                     // out << epsxfull[ii*J*K+jj*K+kk].real << ',' << jj << ',' << kk << '\n';
+                        //                 }
+                        //             }
+                        //         }
+                        //     }
+                        // } // step==500
+                        if(device_id==0){
+                            if(norm2(A0, _Nconv)<1e-12 || norm2(phi0, _Nconv)<1e-12 ){
+                                *A_change = 1;
+                                *phi_change = 1;
+                            }else{
+                                *A_change = norm2(A1, A0, _Nconv)/norm2(A0, _Nconv);
+                                *phi_change = norm2(phi1, phi0, _Nconv)/norm2(phi0, _Nconv);
+                            }
+                            std::cout << "Step:" << step << ", A_change:" << *A_change << ", phi_change:"
+                                << *phi_change << std::endl;
+                            if (*A_change<=2.0){
+                                *Tn_factor = int(exp(log(*A_change)*0.30103+3.950225));
+                                if(*Tn_factor<1) *Tn_factor = 1;
+                            }
+                        }
+                        Barrier(counter_conv2, mutex_conv2, cv_conv2, _gpus_count);
+                    }else{
+                        p++;
+                    }
+                    step++;
+                }  // while end
+
+                // FDTD_capture_t0_fields
+                for(int ii=0; ii<It; ii++){
+                    for(int jj=0; jj<Jt; jj++){
+                        for(int kk=0; kk<Kt; kk++){
+                            _Ex_t0[(ii+i0t)*J*K+(jj+j0t)*K+kk+k0t] = Ext[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+kk+1];
+                            _Ey_t0[(ii+i0t)*J*K+(jj+j0t)*K+kk+k0t] = Eyt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+kk+1];
+                            _Ez_t0[(ii+i0t)*J*K+(jj+j0t)*K+kk+k0t] = Ezt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+kk+1];
+                            _Hx_t0[(ii+i0t)*J*K+(jj+j0t)*K+kk+k0t] = Hxt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+kk+1];
+                            _Hy_t0[(ii+i0t)*J*K+(jj+j0t)*K+kk+k0t] = Hyt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+kk+1];
+                            _Hz_t0[(ii+i0t)*J*K+(jj+j0t)*K+kk+k0t] = Hzt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+kk+1];
+                        }
+                    }
+                } // FDTD_capture_t0_fields end
+
+                // Perform another Tn steps to get a second time point at t1
+                for(int step1=0; step1<Tn; step1++){
+                    _kpar_list_host[device_id]->t = (step+step1)*_dt;
+
+                    gpuErrchk(cudaMemcpyAsync(_kpar_list[device_id], _kpar_list_host[device_id], sizeof(kernelpar), cudaMemcpyHostToDevice, compute_stream_list[device_id]));
+                    cudaEventRecord(h_time_event_list[device_id], compute_stream_list[device_id]);
+
+                    cudaStreamWaitEvent(compute_stream_list[device_id], h_time_event_list[device_id], 0);
+                    cudaStreamWaitEvent(compute_stream_list[device_id], e_border_event_list[device_id], 0);
+                    kernel_update_H_bulk <<< _griddim_list[device_id], blockdim, 0, compute_stream_list[device_id] >>> (_kpar_list[device_id]);
+                    cudaEventRecord(h_bulk_event_list[device_id], compute_stream_list[device_id]);
+
+                    cudaStreamWaitEvent(sync_stream_list[device_id], h_time_event_list[device_id], 0);
+                    cudaStreamWaitEvent(sync_stream_list[device_id], e_bulk_event_list[device_id], 0);
+                    cudaStreamWaitEvent(sync_stream_list[device_id], e_border_event_list[device_id], 0);
+                    kernel_update_H_border <<< _griddimghost_list[device_id], blockdim, 0, sync_stream_list[device_id] >>> (_kpar_list[device_id]);
+                    cudaEventRecord(h_border_event_list[device_id], sync_stream_list[device_id]);
+
+                    if(_gpus_count>1){
+                        Barrier(counter_H, mutex_H, cv_H, _gpus_count);
+                        if(device_id==0){
+                            cudaStreamWaitEvent(sync_stream_list[device_id], h_border_event_list[device_id+1], 0);
+                            if(_P2Pworking){
+                                gpuErrchk(cudaMemcpyPeerAsync(_kpar_list_host[device_id]->H_bufferright, device_id, _kpar_list_host[device_id+1]->H_ghostleft, device_id+1, 3*_ghostsize_list[device_id]*sizeof(double), sync_stream_list[device_id]));
+                            }else{
+                                gpuErrchk(cudaMemcpyAsync(Emid_list[device_id], _kpar_list_host[device_id+1]->H_ghostleft, 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyDeviceToHost, sync_stream_list[device_id]));
+                                gpuErrchk(cudaMemcpyAsync(_kpar_list_host[device_id]->H_bufferright, Emid_list[device_id], 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyHostToDevice, sync_stream_list[device_id]));
+                            }
+                        }
+                        else if(device_id==_gpus_count-1){
+                            cudaStreamWaitEvent(sync_stream_list[device_id], h_border_event_list[device_id-1], 0);
+                            if(_P2Pworking){
+                                gpuErrchk(cudaMemcpyPeerAsync(_kpar_list_host[device_id]->H_bufferleft, device_id, _kpar_list_host[device_id-1]->H_ghostright, device_id-1, 3*_ghostsize_list[device_id]*sizeof(double), sync_stream_list[device_id]));
+                            }else{
+                                gpuErrchk(cudaMemcpyAsync(Emid_list[device_id], _kpar_list_host[device_id-1]->H_ghostright, 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyDeviceToHost, sync_stream_list[device_id]));
+                                gpuErrchk(cudaMemcpyAsync(_kpar_list_host[device_id]->H_bufferleft, Emid_list[device_id], 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyHostToDevice, sync_stream_list[device_id]));
+                            }
+                        }
+                        else{
+                            cudaStreamWaitEvent(sync_stream_list[device_id], h_border_event_list[device_id+1], 0);
+                            cudaStreamWaitEvent(sync_stream_list[device_id], h_border_event_list[device_id-1], 0);
+                            if(_P2Pworking){
+                                gpuErrchk(cudaMemcpyPeerAsync(_kpar_list_host[device_id]->H_bufferright, device_id, _kpar_list_host[device_id+1]->H_ghostleft, device_id+1, 3*_ghostsize_list[device_id]*sizeof(double), sync_stream_list[device_id]));
+                                gpuErrchk(cudaMemcpyPeerAsync(_kpar_list_host[device_id]->H_bufferleft, device_id, _kpar_list_host[device_id-1]->H_ghostright, device_id-1, 3*_ghostsize_list[device_id]*sizeof(double), sync_stream_list[device_id]));
+                            }else{
+                                gpuErrchk(cudaMemcpyAsync(Emid_list[device_id], _kpar_list_host[device_id+1]->H_ghostleft, 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyDeviceToHost, sync_stream_list[device_id]));
+                                gpuErrchk(cudaMemcpyAsync(_kpar_list_host[device_id]->H_bufferright, Emid_list[device_id], 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyHostToDevice, sync_stream_list[device_id]));
+                                gpuErrchk(cudaMemcpyAsync(Emid_list[device_id], _kpar_list_host[device_id-1]->H_ghostright, 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyDeviceToHost, sync_stream_list[device_id]));
+                                gpuErrchk(cudaMemcpyAsync(_kpar_list_host[device_id]->H_bufferleft, Emid_list[device_id], 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyHostToDevice, sync_stream_list[device_id]));
+                            }
+                        }
+                        kernel_load_ghostlayerH <<< _griddimghost_list[device_id], blockdim, 0, sync_stream_list[device_id] >>> (_kpar_list[device_id]);
+                        cudaEventRecord(h_border_event_list[device_id], sync_stream_list[device_id]);
+                    }
+
+                    _kpar_list_host[device_id]->t = (step+step1+0.5)*_dt;
+                    gpuErrchk(cudaMemcpyAsync(_kpar_list[device_id], _kpar_list_host[device_id], sizeof(kernelpar), cudaMemcpyHostToDevice, compute_stream_list[device_id]));
+                    cudaEventRecord(e_time_event_list[device_id], compute_stream_list[device_id]);
+
+                    cudaStreamWaitEvent(compute_stream_list[device_id], e_time_event_list[device_id], 0);
+                    cudaStreamWaitEvent(compute_stream_list[device_id], h_border_event_list[device_id], 0);
+                    kernel_update_E_bulk <<< _griddim_list[device_id], blockdim, 0, compute_stream_list[device_id] >>> (_kpar_list[device_id]);
+                    cudaEventRecord(e_bulk_event_list[device_id], compute_stream_list[device_id]);
+
+                    cudaStreamWaitEvent(sync_stream_list[device_id], e_time_event_list[device_id], 0);
+                    cudaStreamWaitEvent(sync_stream_list[device_id], h_bulk_event_list[device_id], 0);
+                    cudaStreamWaitEvent(sync_stream_list[device_id], h_border_event_list[device_id], 0);
+                    kernel_update_E_border <<< _griddimghost_list[device_id], blockdim, 0, sync_stream_list[device_id] >>> (_kpar_list[device_id]);
+                    cudaEventRecord(e_border_event_list[device_id], sync_stream_list[device_id]);
+                    
+                    if(_gpus_count>1){
+                        Barrier(counter_E, mutex_E, cv_E, _gpus_count);
+                        if(device_id==0){
+                            cudaStreamWaitEvent(sync_stream_list[device_id], e_border_event_list[device_id+1], 0);
+                            if(_P2Pworking){
+                                gpuErrchk(cudaMemcpyPeerAsync(_kpar_list_host[device_id]->E_bufferright, device_id, _kpar_list_host[device_id+1]->E_ghostleft, device_id+1, 3*_ghostsize_list[device_id]*sizeof(double), sync_stream_list[device_id]));
+                            }else{
+                                gpuErrchk(cudaMemcpyAsync(Emid_list[device_id], _kpar_list_host[device_id+1]->E_ghostleft, 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyDeviceToHost, sync_stream_list[device_id]));
+                                gpuErrchk(cudaMemcpyAsync(_kpar_list_host[device_id]->E_bufferright, Emid_list[device_id], 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyHostToDevice, sync_stream_list[device_id]));
+                            }
+                        }
+                        else if(device_id==_gpus_count-1){
+                            cudaStreamWaitEvent(sync_stream_list[device_id], e_border_event_list[device_id-1], 0);
+                            if(_P2Pworking){
+                                gpuErrchk(cudaMemcpyPeerAsync(_kpar_list_host[device_id]->E_bufferleft, device_id, _kpar_list_host[device_id-1]->E_ghostright, device_id-1, 3*_ghostsize_list[device_id]*sizeof(double), sync_stream_list[device_id]));
+                            }else{
+                                gpuErrchk(cudaMemcpyAsync(Emid_list[device_id], _kpar_list_host[device_id-1]->E_ghostright, 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyDeviceToHost, sync_stream_list[device_id]));
+                                gpuErrchk(cudaMemcpyAsync(_kpar_list_host[device_id]->E_bufferleft, Emid_list[device_id], 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyHostToDevice, sync_stream_list[device_id]));
+                            }
+                        }
+                        else{
+                            cudaStreamWaitEvent(sync_stream_list[device_id], e_border_event_list[device_id+1], 0);
+                            cudaStreamWaitEvent(sync_stream_list[device_id], e_border_event_list[device_id-1], 0);
+                            if(_P2Pworking){
+                                gpuErrchk(cudaMemcpyPeerAsync(_kpar_list_host[device_id]->E_bufferright, device_id, _kpar_list_host[device_id+1]->E_ghostleft, device_id+1, 3*_ghostsize_list[device_id]*sizeof(double), sync_stream_list[device_id]));
+                                gpuErrchk(cudaMemcpyPeerAsync(_kpar_list_host[device_id]->E_bufferleft, device_id, _kpar_list_host[device_id-1]->E_ghostright, device_id-1, 3*_ghostsize_list[device_id]*sizeof(double), sync_stream_list[device_id]));
+                            }else{
+                                gpuErrchk(cudaMemcpyAsync(Emid_list[device_id], _kpar_list_host[device_id+1]->E_ghostleft, 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyDeviceToHost, sync_stream_list[device_id]));
+                                gpuErrchk(cudaMemcpyAsync(_kpar_list_host[device_id]->E_bufferright, Emid_list[device_id], 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyHostToDevice, sync_stream_list[device_id]));
+                                gpuErrchk(cudaMemcpyAsync(Emid_list[device_id], _kpar_list_host[device_id-1]->E_ghostright, 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyDeviceToHost, sync_stream_list[device_id]));
+                                gpuErrchk(cudaMemcpyAsync(_kpar_list_host[device_id]->E_bufferleft, Emid_list[device_id], 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyHostToDevice, sync_stream_list[device_id]));
+                            }
+                        }
+                        kernel_load_ghostlayerE <<< _griddimghost_list[device_id], blockdim,0, sync_stream_list[device_id] >>> (_kpar_list[device_id]);
+                        cudaEventRecord(e_border_event_list[device_id], sync_stream_list[device_id]);
+                    }
+                }
+
+                // FDTD_capture_t1_fields
+                Barrier(counter_t1, mutex_t1, cv_t1, _gpus_count);
+                gpuErrchk(cudaMemcpy(Ext, _kpar_list_host[device_id]->Ex, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToHost));
+                gpuErrchk(cudaMemcpy(Eyt, _kpar_list_host[device_id]->Ey, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToHost));
+                gpuErrchk(cudaMemcpy(Ezt, _kpar_list_host[device_id]->Ez, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToHost));
+                gpuErrchk(cudaMemcpy(Hxt, _kpar_list_host[device_id]->Hx, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToHost));
+                gpuErrchk(cudaMemcpy(Hyt, _kpar_list_host[device_id]->Hy, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToHost));
+                gpuErrchk(cudaMemcpy(Hzt, _kpar_list_host[device_id]->Hz, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToHost));
+                for(int ii=0; ii<It; ii++){
+                    for(int jj=0; jj<Jt; jj++){
+                        for(int kk=0; kk<Kt; kk++){
+                            _Ex_t1[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)] = Ext[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+(kk+1)];
+                            _Ey_t1[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)] = Eyt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+(kk+1)];
+                            _Ez_t1[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)] = Ezt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+(kk+1)];
+                            _Hx_t1[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)] = Hxt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+(kk+1)];
+                            _Hy_t1[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)] = Hyt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+(kk+1)];
+                            _Hz_t1[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)] = Hzt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+(kk+1)];
+                        }
+                    }
+                }
+
+                // Perform another Tn steps to get a third time point at t2
+                for(int step2=0; step2<Tn; step2++){
+                    _kpar_list_host[device_id]->t = (step+step2+Tn)*_dt;
+
+                    gpuErrchk(cudaMemcpyAsync(_kpar_list[device_id], _kpar_list_host[device_id], sizeof(kernelpar), cudaMemcpyHostToDevice, compute_stream_list[device_id]));
+                    cudaEventRecord(h_time_event_list[device_id], compute_stream_list[device_id]);
+
+                    cudaStreamWaitEvent(compute_stream_list[device_id], h_time_event_list[device_id], 0);
+                    cudaStreamWaitEvent(compute_stream_list[device_id], e_border_event_list[device_id], 0);
+                    kernel_update_H_bulk <<< _griddim_list[device_id], blockdim, 0, compute_stream_list[device_id] >>> (_kpar_list[device_id]);
+                    cudaEventRecord(h_bulk_event_list[device_id], compute_stream_list[device_id]);
+
+                    cudaStreamWaitEvent(sync_stream_list[device_id], h_time_event_list[device_id], 0);
+                    cudaStreamWaitEvent(sync_stream_list[device_id], e_bulk_event_list[device_id], 0);
+                    cudaStreamWaitEvent(sync_stream_list[device_id], e_border_event_list[device_id], 0);
+                    kernel_update_H_border <<< _griddimghost_list[device_id], blockdim, 0, sync_stream_list[device_id] >>> (_kpar_list[device_id]);
+                    cudaEventRecord(h_border_event_list[device_id], sync_stream_list[device_id]);
+
+                    if(_gpus_count>1){
+                        Barrier(counter_H, mutex_H, cv_H, _gpus_count);
+                        if(device_id==0){
+                            cudaStreamWaitEvent(sync_stream_list[device_id], h_border_event_list[device_id+1], 0);
+                            if(_P2Pworking){
+                                gpuErrchk(cudaMemcpyPeerAsync(_kpar_list_host[device_id]->H_bufferright, device_id, _kpar_list_host[device_id+1]->H_ghostleft, device_id+1, 3*_ghostsize_list[device_id]*sizeof(double), sync_stream_list[device_id]));
+                            }else{
+                                gpuErrchk(cudaMemcpyAsync(Emid_list[device_id], _kpar_list_host[device_id+1]->H_ghostleft, 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyDeviceToHost, sync_stream_list[device_id]));
+                                gpuErrchk(cudaMemcpyAsync(_kpar_list_host[device_id]->H_bufferright, Emid_list[device_id], 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyHostToDevice, sync_stream_list[device_id]));
+                            }
+                        }
+                        else if(device_id==_gpus_count-1){
+                            cudaStreamWaitEvent(sync_stream_list[device_id], h_border_event_list[device_id-1], 0);
+                            if(_P2Pworking){
+                                gpuErrchk(cudaMemcpyPeerAsync(_kpar_list_host[device_id]->H_bufferleft, device_id, _kpar_list_host[device_id-1]->H_ghostright, device_id-1, 3*_ghostsize_list[device_id]*sizeof(double), sync_stream_list[device_id]));
+                            }else{
+                                gpuErrchk(cudaMemcpyAsync(Emid_list[device_id], _kpar_list_host[device_id-1]->H_ghostright, 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyDeviceToHost, sync_stream_list[device_id]));
+                                gpuErrchk(cudaMemcpyAsync(_kpar_list_host[device_id]->H_bufferleft, Emid_list[device_id], 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyHostToDevice, sync_stream_list[device_id]));
+                            }
+                        }
+                        else{
+                            cudaStreamWaitEvent(sync_stream_list[device_id], h_border_event_list[device_id+1], 0);
+                            cudaStreamWaitEvent(sync_stream_list[device_id], h_border_event_list[device_id-1], 0);
+                            if(_P2Pworking){
+                                gpuErrchk(cudaMemcpyPeerAsync(_kpar_list_host[device_id]->H_bufferright, device_id, _kpar_list_host[device_id+1]->H_ghostleft, device_id+1, 3*_ghostsize_list[device_id]*sizeof(double), sync_stream_list[device_id]));
+                                gpuErrchk(cudaMemcpyPeerAsync(_kpar_list_host[device_id]->H_bufferleft, device_id, _kpar_list_host[device_id-1]->H_ghostright, device_id-1, 3*_ghostsize_list[device_id]*sizeof(double), sync_stream_list[device_id]));
+                            }else{
+                                gpuErrchk(cudaMemcpyAsync(Emid_list[device_id], _kpar_list_host[device_id+1]->H_ghostleft, 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyDeviceToHost, sync_stream_list[device_id]));
+                                gpuErrchk(cudaMemcpyAsync(_kpar_list_host[device_id]->H_bufferright, Emid_list[device_id], 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyHostToDevice, sync_stream_list[device_id]));
+                                gpuErrchk(cudaMemcpyAsync(Emid_list[device_id], _kpar_list_host[device_id-1]->H_ghostright, 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyDeviceToHost, sync_stream_list[device_id]));
+                                gpuErrchk(cudaMemcpyAsync(_kpar_list_host[device_id]->H_bufferleft, Emid_list[device_id], 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyHostToDevice, sync_stream_list[device_id]));
+                            }
+                        }
+                        kernel_load_ghostlayerH <<< _griddimghost_list[device_id], blockdim, 0, sync_stream_list[device_id] >>> (_kpar_list[device_id]);
+                        cudaEventRecord(h_border_event_list[device_id], sync_stream_list[device_id]);
+                    }
+
+                    _kpar_list_host[device_id]->t = (step+step2+Tn+0.5)*_dt;
+                    gpuErrchk(cudaMemcpyAsync(_kpar_list[device_id], _kpar_list_host[device_id], sizeof(kernelpar), cudaMemcpyHostToDevice, compute_stream_list[device_id]));
+                    cudaEventRecord(e_time_event_list[device_id], compute_stream_list[device_id]);
+
+                    cudaStreamWaitEvent(compute_stream_list[device_id], e_time_event_list[device_id], 0);
+                    cudaStreamWaitEvent(compute_stream_list[device_id], h_border_event_list[device_id], 0);
+                    kernel_update_E_bulk <<< _griddim_list[device_id], blockdim, 0, compute_stream_list[device_id] >>> (_kpar_list[device_id]);
+                    cudaEventRecord(e_bulk_event_list[device_id], compute_stream_list[device_id]);
+
+                    cudaStreamWaitEvent(sync_stream_list[device_id], e_time_event_list[device_id], 0);
+                    cudaStreamWaitEvent(sync_stream_list[device_id], h_bulk_event_list[device_id], 0);
+                    cudaStreamWaitEvent(sync_stream_list[device_id], h_border_event_list[device_id], 0);
+                    kernel_update_E_border <<< _griddimghost_list[device_id], blockdim, 0, sync_stream_list[device_id] >>> (_kpar_list[device_id]);
+                    cudaEventRecord(e_border_event_list[device_id], sync_stream_list[device_id]);
+                    
+                    if(_gpus_count>1){
+                        Barrier(counter_E, mutex_E, cv_E, _gpus_count);
+                        if(device_id==0){
+                            cudaStreamWaitEvent(sync_stream_list[device_id], e_border_event_list[device_id+1], 0);
+                            if(_P2Pworking){
+                                gpuErrchk(cudaMemcpyPeerAsync(_kpar_list_host[device_id]->E_bufferright, device_id, _kpar_list_host[device_id+1]->E_ghostleft, device_id+1, 3*_ghostsize_list[device_id]*sizeof(double), sync_stream_list[device_id]));
+                            }else{
+                                gpuErrchk(cudaMemcpyAsync(Emid_list[device_id], _kpar_list_host[device_id+1]->E_ghostleft, 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyDeviceToHost, sync_stream_list[device_id]));
+                                gpuErrchk(cudaMemcpyAsync(_kpar_list_host[device_id]->E_bufferright, Emid_list[device_id], 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyHostToDevice, sync_stream_list[device_id]));
+                            }
+                        }
+                        else if(device_id==_gpus_count-1){
+                            cudaStreamWaitEvent(sync_stream_list[device_id], e_border_event_list[device_id-1], 0);
+                            if(_P2Pworking){
+                                gpuErrchk(cudaMemcpyPeerAsync(_kpar_list_host[device_id]->E_bufferleft, device_id, _kpar_list_host[device_id-1]->E_ghostright, device_id-1, 3*_ghostsize_list[device_id]*sizeof(double), sync_stream_list[device_id]));
+                            }else{
+                                gpuErrchk(cudaMemcpyAsync(Emid_list[device_id], _kpar_list_host[device_id-1]->E_ghostright, 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyDeviceToHost, sync_stream_list[device_id]));
+                                gpuErrchk(cudaMemcpyAsync(_kpar_list_host[device_id]->E_bufferleft, Emid_list[device_id], 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyHostToDevice, sync_stream_list[device_id]));
+                            }
+                        }
+                        else{
+                            cudaStreamWaitEvent(sync_stream_list[device_id], e_border_event_list[device_id+1], 0);
+                            cudaStreamWaitEvent(sync_stream_list[device_id], e_border_event_list[device_id-1], 0);
+                            if(_P2Pworking){
+                                gpuErrchk(cudaMemcpyPeerAsync(_kpar_list_host[device_id]->E_bufferright, device_id, _kpar_list_host[device_id+1]->E_ghostleft, device_id+1, 3*_ghostsize_list[device_id]*sizeof(double), sync_stream_list[device_id]));
+                                gpuErrchk(cudaMemcpyPeerAsync(_kpar_list_host[device_id]->E_bufferleft, device_id, _kpar_list_host[device_id-1]->E_ghostright, device_id-1, 3*_ghostsize_list[device_id]*sizeof(double), sync_stream_list[device_id]));
+                            }else{
+                                gpuErrchk(cudaMemcpyAsync(Emid_list[device_id], _kpar_list_host[device_id+1]->E_ghostleft, 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyDeviceToHost, sync_stream_list[device_id]));
+                                gpuErrchk(cudaMemcpyAsync(_kpar_list_host[device_id]->E_bufferright, Emid_list[device_id], 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyHostToDevice, sync_stream_list[device_id]));
+                                gpuErrchk(cudaMemcpyAsync(Emid_list[device_id], _kpar_list_host[device_id-1]->E_ghostright, 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyDeviceToHost, sync_stream_list[device_id]));
+                                gpuErrchk(cudaMemcpyAsync(_kpar_list_host[device_id]->E_bufferleft, Emid_list[device_id], 3*_ghostsize_list[device_id]*sizeof(double), cudaMemcpyHostToDevice, sync_stream_list[device_id]));
+                            }
+                        }
+                        kernel_load_ghostlayerE <<< _griddimghost_list[device_id], blockdim,0, sync_stream_list[device_id] >>> (_kpar_list[device_id]);
+                        cudaEventRecord(e_border_event_list[device_id], sync_stream_list[device_id]);
+                    }
+                }
+
+                // Capture fields at t2
+                Barrier(counter_t2, mutex_t2, cv_t2, _gpus_count);
+                gpuErrchk(cudaMemcpy(Ext, _kpar_list_host[device_id]->Ex, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToHost));
+                gpuErrchk(cudaMemcpy(Eyt, _kpar_list_host[device_id]->Ey, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToHost));
+                gpuErrchk(cudaMemcpy(Ezt, _kpar_list_host[device_id]->Ez, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToHost));
+                gpuErrchk(cudaMemcpy(Hxt, _kpar_list_host[device_id]->Hx, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToHost));
+                gpuErrchk(cudaMemcpy(Hyt, _kpar_list_host[device_id]->Hy, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToHost));
+                gpuErrchk(cudaMemcpy(Hzt, _kpar_list_host[device_id]->Hz, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToHost));
+
+                // Calculate complex fields
+                t0 = step*_dt;
+                t1 = (step+Tn)*_dt;
+                t2 = (step+Tn+Tn)*_dt;
+                double t0H, t1H, t2H, phi, A, f0, f1, f2;
+                t0H = t0 - _dt/2; t1H = t1 - _dt/2; t2H = t2 - _dt/2;
+                for(int ii=0; ii<It; ii++){
+                    for(int jj=0; jj<Jt; jj++){
+                        for(int kk=0; kk<Kt; kk++){
+                            // Ex
+                            f0 = _Ex_t0[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)].real;
+                            f1 = _Ex_t1[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)].real;
+                            f2 = Ext[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+(kk+1)];
+                            phi = calc_phase(t0, t1, t2, f0, f1, f2);
+                            A = calc_amplitude(t0, t1, t2, f0, f1, f2, phi);
+                            if(A<0){ A*=-1; phi+=M_PI; }
+                            _Ex_t0[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)].real = A*cos(phi);
+                            _Ex_t0[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)].imag = -A*sin(phi);
+
+                            // Ey
+                            f0 = _Ey_t0[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)].real;
+                            f1 = _Ey_t1[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)].real;
+                            f2 = Eyt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+(kk+1)];
+                            phi = calc_phase(t0, t1, t2, f0, f1, f2);
+                            A = calc_amplitude(t0, t1, t2, f0, f1, f2, phi);
+                            if(A<0){ A*=-1; phi+=M_PI; }
+                            _Ey_t0[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)].real = A*cos(phi);
+                            _Ey_t0[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)].imag = -A*sin(phi);
+
+                            // Ez
+                            f0 = _Ez_t0[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)].real;
+                            f1 = _Ez_t1[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)].real;
+                            f2 = Ezt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+(kk+1)];
+                            phi = calc_phase(t0, t1, t2, f0, f1, f2);
+                            A = calc_amplitude(t0, t1, t2, f0, f1, f2, phi);
+                            if(A<0){ A*=-1; phi+=M_PI; }
+                            _Ez_t0[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)].real = A*cos(phi);
+                            _Ez_t0[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)].imag = -A*sin(phi);
+
+                            // Hx
+                            f0 = _Hx_t0[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)].real;
+                            f1 = _Hx_t1[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)].real;
+                            f2 = Hxt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+(kk+1)];
+                            phi = calc_phase(t0H, t1H, t2H, f0, f1, f2);
+                            A = calc_amplitude(t0H, t1H, t2H, f0, f1, f2, phi);
+                            if(A<0){ A*=-1; phi+=M_PI; }
+                            _Hx_t0[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)].real = A*cos(phi);
+                            _Hx_t0[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)].imag = -A*sin(phi);
+
+                            // Hy
+                            f0 = _Hy_t0[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)].real;
+                            f1 = _Hy_t1[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)].real;
+                            f2 = Hyt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+(kk+1)];
+                            phi = calc_phase(t0H, t1H, t2H, f0, f1, f2);
+                            A = calc_amplitude(t0H, t1H, t2H, f0, f1, f2, phi);
+                            if(A<0){ A*=-1; phi+=M_PI; }
+                            _Hy_t0[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)].real = A*cos(phi);
+                            _Hy_t0[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)].imag = -A*sin(phi);
+
+                            // Hz
+                            f0 = _Hz_t0[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)].real;
+                            f1 = _Hz_t1[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)].real;
+                            f2 = Hzt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+(kk+1)];
+                            phi = calc_phase(t0H, t1H, t2H, f0, f1, f2);
+                            A = calc_amplitude(t0H, t1H, t2H, f0, f1, f2, phi);
+                            if(A<0){ A*=-1; phi+=M_PI; }
+                            _Hz_t0[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)].real = A*cos(phi);
+                            _Hz_t0[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)].imag = -A*sin(phi);
+                        }
+                    }
+                } // Calculate complex fields ends
+
+                // Free up memory
+                delete[] Ext; delete[] Eyt; delete[] Ezt;
+                delete[] Hxt; delete[] Hyt; delete[] Hzt;
+            }  // try
+            catch(std::runtime_error &error){
+                std::cerr << "FDTD error in thread " << device_id << ":" << error.what() << std::endl;
+            }
+        });
+    }
+    for(auto &thread: threads_kernels)
+        thread.join();
+
+    // Free up memory
+    delete[] Ex0; delete[] Ex1; delete[] Ex2; delete[] Ey0; delete[] Ey1; delete[] Ey2; delete[] Ez0; delete[] Ez1; delete[] Ez2;
+    delete[] phi0; delete[] phi1; delete[] A0; delete[] A1;
+
 }
 
 void fdtd::FDTD::update_E(int n, double t)
@@ -2004,9 +4146,34 @@ void FDTD_set_dt(fdtd::FDTD* fdtd, double dt)
     fdtd->set_dt(dt);
 }
 
+void FDTD_set_rtol(fdtd::FDTD* fdtd, double rtol)
+{
+    fdtd->set_rtol(rtol);
+}
+
+void FDTD_set_Ncycle(fdtd::FDTD* fdtd, double Ncycle)
+{
+    fdtd->set_Ncycle(Ncycle);
+}
+
 void FDTD_set_complex_eps(fdtd::FDTD* fdtd, bool complex_eps)
 {
     fdtd->set_complex_eps(complex_eps);
+}
+
+void FDTD_set_gpus_count(fdtd::FDTD* fdtd, int gpus_count)
+{
+    fdtd->set_gpus_count(gpus_count);
+}
+
+void FDTD_set_GPUDirect(fdtd::FDTD* fdtd)
+{
+    fdtd->set_GPUDirect();
+}
+
+void FDTD_set_domain_decomposition(fdtd::FDTD* fdtd, char domain_decomp)
+{
+    fdtd->set_domain_decomposition(domain_decomp);
 }
 
 void FDTD_copyCUDA_field_arrays(fdtd::FDTD* fdtd)
@@ -2032,6 +4199,16 @@ void FDTD_block_CUDA_malloc_memcpy(fdtd::FDTD* fdtd)
 void FDTD_block_CUDA_src_malloc_memcpy(fdtd::FDTD* fdtd)
 {
     fdtd->block_CUDA_src_malloc_memcpy();
+}
+
+void FDTD_block_CUDA_multigpu_init(fdtd::FDTD* fdtd)
+{
+    fdtd->block_CUDA_multigpu_init();
+}
+
+void FDTD_solve(fdtd::FDTD* fdtd)
+{
+    fdtd->solve();
 }
 
 void FDTD_calc_ydAx(fdtd::FDTD* fdtd, size_t size, size_t Nx, size_t Ny, size_t Nz, size_t i0, size_t i1, size_t i2,

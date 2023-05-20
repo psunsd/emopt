@@ -1,39 +1,18 @@
 # EMopt
-A toolkit for shape (and topology) optimization of 2D and 3D electromagnetic
-structures. 
+Refer to the documents [on readthedocs](https://emopt.readthedocs.io/en/latest/) created by Andy Michaels for details on how to install and use EMopt.  This markdown document will only contain the new APIs that are added to the GPU-EMopt.
 
-EMopt offers a suite of tools for simulating and optimizing electromagnetic
-structures. It includes 2D and 3D finite difference frequency domain solvers,
-1D and 2D mode solvers, a flexible and *easily extensible* adjoint method
-implementation, and a simple wrapper around scipy.minimize. Out of the box, it
-provides just about everything needed to apply cutting-edge inverse design
-techniques to your electromagnetic devices.
+# GPU-EMopt
+In this fork, the FDTD module, the grid meshing module, and part of the gradient calculation module are ported to CUDA C++.  Although my intention at the beginning was to design the GPU-EMopt in a way such that the CPU- and GPU-modules can be swapped freely, it becomes increasingly difficult without clear benefit, so this feature will not be supported in current and future versions. 
 
-A key emphasis of EMopt's is shape optimization. Using boundary smoothing
-techniques, EMopt allows you to compute sensitivities (i.e. gradient of a
-figure of merit with respect to design variables which define an
-electromagnetic device's shape) with very high accuracy. This allows you to
-easily take adavantage of powerful minimization techniques in order to optimize
-your electromagnetic device.
+## FDTD module
+The following new parameters in the initialization of emopt.fdtd.FDTD class are exposed to users:
 
-## Documentation
+    gpus_count: integer; number of GPUs used for FDTD; default to 1
+  
+    domain_decomp: char; domain decomposition direction; options are 'x', 'y', or 'z'; default to 'x'
 
-Details on how to install and use EMopt can be found
-[on readthedocs](https://emopt.readthedocs.io/en/latest/). Check this link
-periodically as the documentation is constantly being improved and examples
-added.
 
-## Authors
-Andrew Michaels 
+## Grid meshing module
+The following new parameters in the initialization of emopt.grid.StructuredMaterial3D are exposed to users:
 
-## License
-EMOpt is currently released under the BSD-3 license (see LICENSE.md for details)
-
-## References
-The methods employed by EMopt are described in:
-
-Andrew Michaels and Eli Yablonovitch, "Leveraging continuous material averaging for inverse electromagnetic design," Opt. Express 26, 31717-31737 (2018)
-
-An example of applying these methods to real design problems can be found in:
-
-Andrew Michaels and Eli Yablonovitch, "Inverse design of near unity efficiency perfectly vertical grating couplers," Opt. Express 26, 4766-4779 (2018)
+    Nsubcell: integer; number of subcells per grid cell used for fas approximate calculation of polygon clipping between geometry primitive and grid cell; default to 256

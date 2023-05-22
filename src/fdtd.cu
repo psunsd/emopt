@@ -180,12 +180,19 @@ void cudaP2PAssert(int* _P2Pworking)
     for(int device_id=0; device_id<Ngpus; device_id++){
         threads_list.emplace_back([=](){
             gpuErrchk(cudaSetDevice(device_id));
-            if(device_id==0) {gpuErrchk(cudaMemcpyPeer(d_receiver_list[device_id], device_id, d_sender_list[device_id+1], device_id+1, sizeof(double)));}
-            else {gpuErrchk(cudaMemcpyPeer(d_receiver_list[device_id], device_id, d_sender_list[device_id-1], device_id-1, sizeof(double)));}
+            if(device_id==0) {
+                gpuErrchk(cudaMemcpyPeer(d_receiver_list[device_id], device_id, d_sender_list[device_id+1], device_id+1, sizeof(double)));
+                gpuErrchk(cudaMemcpy(host_buffer+device_id, d_receiver_list[device_id], sizeof(double), cudaMemcpyDeviceToHost));
+            }
+            else {
+                gpuErrchk(cudaMemcpyPeer(d_receiver_list[device_id], device_id, d_sender_list[device_id-1], device_id-1, sizeof(double)));
+                gpuErrchk(cudaMemcpy(host_buffer+device_id, d_receiver_list[device_id], sizeof(double), cudaMemcpyDeviceToHost));
+            }
         });
     }
     for(auto &thread: threads_list)
         thread.join();
+
     if(host_buffer[0]==host_data[1] && host_buffer[1]==host_data[0])
         *_P2Pworking = 1;
     else
@@ -2024,14 +2031,13 @@ void fdtd::FDTD::block_CUDA_multigpu_init()
         gpuErrchk(cudaMalloc((void **)&dH_ghostleft, 3*_ghost_size*sizeof(double)));
         gpuErrchk(cudaMalloc((void **)&dH_ghostright, 3*_ghost_size*sizeof(double)));
 
-        size_t blockSize = 256;
-        size_t numBlocks = ceil((field_len+blockSize-1)/(double)blockSize);
-        init_mat <<< numBlocks, blockSize >>> (dEx, field_len, 0.0);
-        init_mat <<< numBlocks, blockSize >>> (dEy, field_len, 0.0);
-        init_mat <<< numBlocks, blockSize >>> (dEz, field_len, 0.0);
-        init_mat <<< numBlocks, blockSize >>> (dHx, field_len, 0.0);
-        init_mat <<< numBlocks, blockSize >>> (dHy, field_len, 0.0);
-        init_mat <<< numBlocks, blockSize >>> (dHz, field_len, 0.0);
+        size_t numBlocks = ceil(field_len/(double)blockdim);
+        init_mat <<< numBlocks, blockdim >>> (dEx, field_len, 0.0);
+        init_mat <<< numBlocks, blockdim >>> (dEy, field_len, 0.0);
+        init_mat <<< numBlocks, blockdim >>> (dEz, field_len, 0.0);
+        init_mat <<< numBlocks, blockdim >>> (dHx, field_len, 0.0);
+        init_mat <<< numBlocks, blockdim >>> (dHy, field_len, 0.0);
+        init_mat <<< numBlocks, blockdim >>> (dHz, field_len, 0.0);
 
         _kpar_host->E_bufferleft = dE_bufferleft; 
         _kpar_host->E_bufferright = dE_bufferright;
@@ -2061,8 +2067,8 @@ void fdtd::FDTD::block_CUDA_multigpu_init()
         _kpar_host->epsx_full = depsx_full; _kpar_host->epsy_full = depsy_full; _kpar_host->epsz_full = depsz_full;
         
         gpuErrchk(cudaMemcpy(_kpar_list[device_id], _kpar_host, sizeof(kernelpar), cudaMemcpyHostToDevice));
-        numBlocks = ceil(mat_len/(double)blockSize);
-        kernel_copy_eps <<< numBlocks, blockSize >>> (_kpar_list[device_id]);
+        numBlocks = ceil(mat_len/(double)blockdim);
+        kernel_copy_eps <<< numBlocks, blockdim >>> (_kpar_list[device_id]);
 
         gpuErrchk(cudaFree(depsx_full)); gpuErrchk(cudaFree(depsy_full)); gpuErrchk(cudaFree(depsz_full));
 
@@ -2073,6 +2079,11 @@ void fdtd::FDTD::block_CUDA_multigpu_init()
             gpuErrchk(cudaMalloc((void **)&dpml_Ezx0, N*sizeof(double)));
             gpuErrchk(cudaMalloc((void **)&dpml_Hyx0, N*sizeof(double)));
             gpuErrchk(cudaMalloc((void **)&dpml_Hzx0, N*sizeof(double)));
+            numBlocks = ceil(N/(double)blockdim);
+            init_mat <<< numBlocks, blockdim >>> (dpml_Eyx0, N, 0.0);
+            init_mat <<< numBlocks, blockdim >>> (dpml_Ezx0, N, 0.0);
+            init_mat <<< numBlocks, blockdim >>> (dpml_Hyx0, N, 0.0);
+            init_mat <<< numBlocks, blockdim >>> (dpml_Hzx0, N, 0.0);
         }
         if(k0t+Kt>_Nx-_w_pml_x1){
             N = _kpar_host->I * _kpar_host->J * (_kpar_host->k0 + _kpar_host->K - (_Nx - _w_pml_x1));
@@ -2080,6 +2091,11 @@ void fdtd::FDTD::block_CUDA_multigpu_init()
             gpuErrchk(cudaMalloc((void **)&dpml_Ezx1, N*sizeof(double)));
             gpuErrchk(cudaMalloc((void **)&dpml_Hyx1, N*sizeof(double)));
             gpuErrchk(cudaMalloc((void **)&dpml_Hzx1, N*sizeof(double)));
+            numBlocks = ceil(N/(double)blockdim);
+            init_mat <<< numBlocks, blockdim >>> (dpml_Eyx1, N, 0.0);
+            init_mat <<< numBlocks, blockdim >>> (dpml_Ezx1, N, 0.0);
+            init_mat <<< numBlocks, blockdim >>> (dpml_Hyx1, N, 0.0);
+            init_mat <<< numBlocks, blockdim >>> (dpml_Hzx1, N, 0.0);
         }
         if(j0t<_w_pml_y0){
             N = _kpar_host->I * _kpar_host->K * (_w_pml_y0 - _kpar_host->j0);
@@ -2087,6 +2103,11 @@ void fdtd::FDTD::block_CUDA_multigpu_init()
             gpuErrchk(cudaMalloc((void **)&dpml_Ezy0, N*sizeof(double)));
             gpuErrchk(cudaMalloc((void **)&dpml_Hxy0, N*sizeof(double)));
             gpuErrchk(cudaMalloc((void **)&dpml_Hzy0, N*sizeof(double)));
+            numBlocks = ceil(N/(double)blockdim);
+            init_mat <<< numBlocks, blockdim >>> (dpml_Exy0, N, 0.0);
+            init_mat <<< numBlocks, blockdim >>> (dpml_Ezy0, N, 0.0);
+            init_mat <<< numBlocks, blockdim >>> (dpml_Hxy0, N, 0.0);
+            init_mat <<< numBlocks, blockdim >>> (dpml_Hzy0, N, 0.0);
         }
         if(j0t+Jt>_Ny-_w_pml_y1){
             N = _kpar_host->I * _kpar_host->K * (_kpar_host->j0 + _kpar_host->J - (_Ny - _w_pml_y1));
@@ -2094,6 +2115,11 @@ void fdtd::FDTD::block_CUDA_multigpu_init()
             gpuErrchk(cudaMalloc((void **)&dpml_Ezy1, N*sizeof(double)));
             gpuErrchk(cudaMalloc((void **)&dpml_Hxy1, N*sizeof(double)));
             gpuErrchk(cudaMalloc((void **)&dpml_Hzy1, N*sizeof(double)));
+            numBlocks = ceil(N/(double)blockdim);
+            init_mat <<< numBlocks, blockdim >>> (dpml_Exy1, N, 0.0);
+            init_mat <<< numBlocks, blockdim >>> (dpml_Ezy1, N, 0.0);
+            init_mat <<< numBlocks, blockdim >>> (dpml_Hxy1, N, 0.0);
+            init_mat <<< numBlocks, blockdim >>> (dpml_Hzy1, N, 0.0);
         }
         if(i0t<_w_pml_z0){
             N = _kpar_host->J * _kpar_host->K * (_w_pml_z0 - _kpar_host->i0);
@@ -2101,6 +2127,11 @@ void fdtd::FDTD::block_CUDA_multigpu_init()
             gpuErrchk(cudaMalloc((void **)&dpml_Eyz0, N*sizeof(double)));
             gpuErrchk(cudaMalloc((void **)&dpml_Hxz0, N*sizeof(double)));
             gpuErrchk(cudaMalloc((void **)&dpml_Hyz0, N*sizeof(double)));
+            numBlocks = ceil(N/(double)blockdim);
+            init_mat <<< numBlocks, blockdim >>> (dpml_Exz0, N, 0.0);
+            init_mat <<< numBlocks, blockdim >>> (dpml_Eyz0, N, 0.0);
+            init_mat <<< numBlocks, blockdim >>> (dpml_Hxz0, N, 0.0);
+            init_mat <<< numBlocks, blockdim >>> (dpml_Hyz0, N, 0.0);
         }
         if(i0t+It>_Nz-_w_pml_z1){
             N = _kpar_host->J * _kpar_host->K * (_kpar_host->i0 + _kpar_host->I - (_Nz - _w_pml_z1));
@@ -2108,6 +2139,11 @@ void fdtd::FDTD::block_CUDA_multigpu_init()
             gpuErrchk(cudaMalloc((void **)&dpml_Eyz1, N*sizeof(double)));
             gpuErrchk(cudaMalloc((void **)&dpml_Hxz1, N*sizeof(double)));
             gpuErrchk(cudaMalloc((void **)&dpml_Hyz1, N*sizeof(double)));
+            numBlocks = ceil(N/(double)blockdim);
+            init_mat <<< numBlocks, blockdim >>> (dpml_Exz1, N, 0.0);
+            init_mat <<< numBlocks, blockdim >>> (dpml_Eyz1, N, 0.0);
+            init_mat <<< numBlocks, blockdim >>> (dpml_Hxz1, N, 0.0);
+            init_mat <<< numBlocks, blockdim >>> (dpml_Hyz1, N, 0.0);
         }
 
         gpuErrchk(cudaMalloc((void **)&dkappa_H_x, Npmlx*sizeof(double)));
@@ -2219,6 +2255,67 @@ void fdtd::FDTD::block_CUDA_multigpu_init()
 
         gpuErrchk(cudaMemcpy(_kpar_list[device_id], _kpar_host, sizeof(kernelpar), cudaMemcpyHostToDevice));
         _kpar_list_host[device_id] = _kpar_host;
+    }
+}
+
+void fdtd::FDTD::block_CUDA_multigpu_free()
+{
+    for(int device_id=0; device_id<_gpus_count; device_id++){
+        cudaSetDevice(device_id);
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->bc));
+        // sources
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->i0s));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->j0s));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->k0s));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->Is));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->Js));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->Ks));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->Jx));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->Jy));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->Jz));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->Mx));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->My));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->Mz));
+        // fields
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->Ex));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->Ey));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->Ez));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->Hx));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->Hy));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->Hz));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->E_bufferleft));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->E_bufferright));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->H_bufferleft));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->H_bufferright));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->E_ghostleft));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->E_ghostright));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->H_ghostleft));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->H_ghostright));
+        // materials
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->epsx));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->epsy));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->epsz));
+        // PMLs
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->kappa_H_x));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->kappa_H_y));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->kappa_H_z));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->kappa_E_x));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->kappa_E_y));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->kappa_E_z));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->bHx));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->bHy));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->bHz));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->bEx));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->bEy));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->bEz));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->cHx));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->cHy));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->cHz));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->cEx));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->cEy));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->cEz));
+
+        gpuErrchk(cudaFree(_kpar_list[device_id]));
     }
 }
 
@@ -2577,8 +2674,6 @@ void fdtd::FDTD::solve()
     A0 = (double *)malloc(_Nconv*sizeof(double)); std::fill(A0, A0+_Nconv, 0.0);
     A1 = (double *)malloc(_Nconv*sizeof(double)); std::fill(A1, A1+_Nconv, 0.0);
 
-    // complex128 *epsxfull = (complex128 *)malloc(_Nx*_Ny*_Nz*sizeof(complex128));
-
     // Prepare buffer matrices for device-to-device transfer 
     std::vector<double *> Emid_list{};
     Emid_list.reserve(_gpus_count);
@@ -2618,8 +2713,6 @@ void fdtd::FDTD::solve()
                 Hxt = (double *)malloc((It+2)*(Jt+2)*(Kt+2)*sizeof(double));
                 Hyt = (double *)malloc((It+2)*(Jt+2)*(Kt+2)*sizeof(double));
                 Hzt = (double *)malloc((It+2)*(Jt+2)*(Kt+2)*sizeof(double));
-
-                // complex128 *epsxt = (complex128 *)malloc(It*Jt*Kt*sizeof(complex128));
 
                 int step{0};
                 while(*A_change > amp_rtol || *phi_change > phi_rtol || std::isnan(*A_change) || std::isnan(*phi_change))
@@ -2774,36 +2867,6 @@ void fdtd::FDTD::solve()
                         }
                         Barrier(counter_conv, mutex_conv, cv_conv, _gpus_count);
 
-                        // capture fields at 500th step
-                        // if(step==1000){
-                        //     // FDTD_capture_t0_fields
-                        //     for(int ii=0; ii<It; ii++){
-                        //         for(int jj=0; jj<Jt; jj++){
-                        //             for(int kk=0; kk<Kt; kk++){
-                        //                 _Ex_t0[(ii+i0t)*J*K+(jj+j0t)*K+kk+k0t] = Ext[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+kk+1];
-                        //                 _Ey_t0[(ii+i0t)*J*K+(jj+j0t)*K+kk+k0t] = Eyt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+kk+1];
-                        //                 _Ez_t0[(ii+i0t)*J*K+(jj+j0t)*K+kk+k0t] = Ezt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+kk+1];
-                        //                 _Hx_t0[(ii+i0t)*J*K+(jj+j0t)*K+kk+k0t] = Hxt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+kk+1];
-                        //                 _Hy_t0[(ii+i0t)*J*K+(jj+j0t)*K+kk+k0t] = Hyt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+kk+1];
-                        //                 _Hz_t0[(ii+i0t)*J*K+(jj+j0t)*K+kk+k0t] = Hzt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+kk+1];
-
-                        //                 // epsxfull[(ii+i0t)*J*K+(jj+j0t)*K+kk+k0t] = epsxt[ii*Jt*Kt+jj*Kt+kk];
-                        //             }
-                        //         }
-                        //     } // FDTD_capture_t0_fields end
-                        //     if(device_id==0){
-                        //         std::ofstream out("field_slice.csv");
-                        //         out << "Ex,j,k" << '\n';
-                        //         for(int ii=37; ii<37+1; ii++){
-                        //             for(int jj=0; jj<J; jj++){
-                        //                 for(int kk=0; kk<K; kk++){
-                        //                     out << _Ex_t0[ii*J*K+jj*K+kk].real << ',' << jj << ',' << kk << '\n';
-                        //                     // out << epsxfull[ii*J*K+jj*K+kk].real << ',' << jj << ',' << kk << '\n';
-                        //                 }
-                        //             }
-                        //         }
-                        //     }
-                        // } // step==500
                         if(device_id==0){
                             if(norm2(A0, _Nconv)<1e-12 || norm2(phi0, _Nconv)<1e-12 ){
                                 *A_change = 1;
@@ -2947,7 +3010,7 @@ void fdtd::FDTD::solve()
                         cudaEventRecord(e_border_event_list[device_id], sync_stream_list[device_id]);
                     }
                 }
-
+                
                 // FDTD_capture_t1_fields
                 Barrier(counter_t1, mutex_t1, cv_t1, _gpus_count);
                 gpuErrchk(cudaMemcpy(Ext, _kpar_list_host[device_id]->Ex, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToHost));
@@ -3173,7 +3236,6 @@ void fdtd::FDTD::solve()
     // Free up memory
     delete[] Ex0; delete[] Ex1; delete[] Ex2; delete[] Ey0; delete[] Ey1; delete[] Ey2; delete[] Ez0; delete[] Ez1; delete[] Ez2;
     delete[] phi0; delete[] phi1; delete[] A0; delete[] A1;
-
 }
 
 void fdtd::FDTD::update_E(int n, double t)
@@ -4204,6 +4266,11 @@ void FDTD_block_CUDA_src_malloc_memcpy(fdtd::FDTD* fdtd)
 void FDTD_block_CUDA_multigpu_init(fdtd::FDTD* fdtd)
 {
     fdtd->block_CUDA_multigpu_init();
+}
+
+void FDTD_block_CUDA_multigpu_free(fdtd::FDTD* fdtd)
+{
+    fdtd->block_CUDA_multigpu_free();
 }
 
 void FDTD_solve(fdtd::FDTD* fdtd)

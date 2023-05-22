@@ -386,7 +386,7 @@ class AdjointMethod(with_metaclass(ABCMeta, object)):
         """
         pass
 
-    @abstractmethod
+    # @abstractmethod
     def calc_gradient_manual(self, sim, params):
         pass
 
@@ -605,18 +605,17 @@ class AdjointMethod(with_metaclass(ABCMeta, object)):
                 # perturb the system
                 params[i] += step
                 self.update_system(params)
-                start = timer()
+
                 if(type(ub[0]) == list or type(ub[0]) == np.ndarray or \
                    type(ub[0]) == tuple):
                     for box in ub:
                         self.sim.perturb(box)
                 else:
                     self.sim.perturb(ub)
-                print("perturb:",timer()-start)
+
                 # calculate dAdp and assemble the full result on the master node
-                start = timer()
                 product = sim.calc_ydAx(Ai)
-                print("FMR:", timer()-start)
+
                 grad_part = -2*np.real( product/step )
                 grad_parts.append(grad_part)
 

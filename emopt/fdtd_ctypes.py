@@ -49,7 +49,7 @@ libFDTD.FDTD_set_local_grid_perturb.restype = None
 libFDTD.FDTD_set_dt.argtypes = [c_void_p, c_double]
 libFDTD.FDTD_set_dt.restype = None
 
-libFDTD.FDTD_set_domain_decomposition.argtypes = [c_void_p, c_char_p]
+libFDTD.FDTD_set_domain_decomposition.argtypes = [c_void_p, c_char]
 libFDTD.FDTD_set_domain_decomposition.restype = None
 
 libFDTD.FDTD_set_rtol.argtypes = [c_void_p, c_double]
@@ -66,6 +66,9 @@ libFDTD.FDTD_set_GPUDirect.restype = None
 
 libFDTD.FDTD_block_CUDA_multigpu_init.argtypes = [c_void_p]
 libFDTD.FDTD_block_CUDA_multigpu_init.restype = None
+
+libFDTD.FDTD_block_CUDA_multigpu_free.argtypes = [c_void_p]
+libFDTD.FDTD_block_CUDA_multigpu_free.restype = None
 
 libFDTD.FDTD_solve.argtypes = [c_void_p]
 libFDTD.FDTD_solve.restype = None

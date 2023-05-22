@@ -487,6 +487,7 @@ namespace fdtd {
             void copyCUDA_field_arrays();
             void set_gpus_count(int gpus_count);
             void block_CUDA_multigpu_init();
+            void block_CUDA_multigpu_free();
 
             void calc_ydAx(size_t size, size_t Nx, size_t Ny, size_t Nz, size_t i0, size_t i1, size_t i2,
                 std::complex<double> *ydAx,
@@ -738,6 +739,7 @@ extern "C" {
         void FDTD_set_GPUDirect(fdtd::FDTD* fdtd);
         void FDTD_set_domain_decomposition(fdtd::FDTD* fdtd, char domain_decomp);
         void FDTD_block_CUDA_multigpu_init(fdtd::FDTD* fdtd);
+        void FDTD_block_CUDA_multigpu_free(fdtd::FDTD* fdtd);
         void FDTD_solve(fdtd::FDTD* fdtd);
         void FDTD_block_CUDA_free(fdtd::FDTD* fdtd);
         void FDTD_block_CUDA_src_free(fdtd::FDTD* fdtd);

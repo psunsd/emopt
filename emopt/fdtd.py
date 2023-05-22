@@ -238,7 +238,7 @@ class FDTD(MaxwellSolver):
 
     def __init__(self, X, Y, Z, dx, dy, dz, wavelength, rtol=1e-6, nconv=None,
                  min_rindex=1.0, complex_eps=False, dist_method='auto', share_eps=False,
-                 geps_x=None, geps_y=None, geps_z=None, pbox=None, gpus_count=1):
+                 geps_x=None, geps_y=None, geps_z=None, pbox=None, gpus_count=1, domain_decomp='x'):
         super(FDTD, self).__init__(3)
 
         if(nconv is None):
@@ -364,6 +364,7 @@ class FDTD(MaxwellSolver):
 
         # detect and set up GPUDirect
         libFDTD.FDTD_set_GPUDirect(self._libfdtd)
+        libFDTD.FDTD_set_domain_decomposition(self._libfdtd, ''.join(domain_decomp).encode('ascii'))
 
         ## Setup default PML properties
         w_pml = 15
@@ -1326,11 +1327,14 @@ class FDTD(MaxwellSolver):
         self._Ex.fill(0); self._Ey.fill(0); self._Ez.fill(0)
         self._Hx.fill(0); self._Hy.fill(0); self._Hz.fill(0)
 
+        # Set up PMLs/materials/fields
+        libFDTD.FDTD_block_CUDA_multigpu_init(self._libfdtd)
+
         # Run the simulation
         libFDTD.FDTD_solve(self._libfdtd)
 
         # free up fields/materials/PML
-        libFDTD.FDTD_block_CUDA_free(self._libfdtd)
+        libFDTD.FDTD_block_CUDA_multigpu_free(self._libfdtd)
 
     def solve_forward(self):
         """Run a forward simulation.
@@ -1405,9 +1409,6 @@ class FDTD(MaxwellSolver):
                                     src.I, src.J, src.K,
                                     False)
 
-        # libFDTD.FDTD_block_CUDA_src_malloc_memcpy(self._libfdtd)
-        libFDTD.FDTD_block_CUDA_multigpu_init(self._libfdtd)
-
         self.__solve()
 
         # free T1 fields
@@ -1419,9 +1420,6 @@ class FDTD(MaxwellSolver):
         self._Hz_fwd_t1.destroy()
         del self._Ex_fwd_t1; del self._Ey_fwd_t1; del self._Ez_fwd_t1
         del self._Hx_fwd_t1; del self._Hy_fwd_t1; del self._Hz_fwd_t1
-
-        if useCUDA:
-            libFDTD.FDTD_block_CUDA_src_free(self._libfdtd)
 
         self.update_saved_fields()
 
@@ -1510,10 +1508,6 @@ class FDTD(MaxwellSolver):
                                     src.I, src.J, src.K,
                                     False)
 
-        if useCUDA:
-            # libFDTD.FDTD_block_CUDA_src_malloc_memcpy(self._libfdtd)
-            libFDTD.FDTD_block_CUDA_multigpu_init(self._libfdtd)
-
         self.__solve()
 
         # free T1 fields
@@ -1526,8 +1520,7 @@ class FDTD(MaxwellSolver):
         del self._Ex_adj_t1; del self._Ey_adj_t1; del self._Ez_adj_t1
         del self._Hx_adj_t1; del self._Hy_adj_t1; del self._Hz_adj_t1
 
-        if useCUDA:
-            libFDTD.FDTD_block_CUDA_src_free(self._libfdtd)
+        # libFDTD.FDTD_block_CUDA_src_free(self._libfdtd)
 
         # update count (for diagnostics)
         self.adjoint_count += 1

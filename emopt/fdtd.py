@@ -1324,8 +1324,6 @@ class FDTD(MaxwellSolver):
     def __solve(self):
         # Reset field values, pmls, etc
         libFDTD.FDTD_reset_pml(self._libfdtd)
-        self._Ex.fill(0); self._Ey.fill(0); self._Ez.fill(0)
-        self._Hx.fill(0); self._Hy.fill(0); self._Hz.fill(0)
 
         # Set up PMLs/materials/fields
         libFDTD.FDTD_block_CUDA_multigpu_init(self._libfdtd)
@@ -1348,16 +1346,6 @@ class FDTD(MaxwellSolver):
 
         pos, lens = self._da.getCorners()
         K, J, I = lens
-        if hasattr(self, "_Ex") == False:
-            self._Ex = np.zeros(((K + 2) * (J + 2) * (I + 2),), dtype=np.double)
-            self._Ey = np.zeros(((K + 2) * (J + 2) * (I + 2),), dtype=np.double)
-            self._Ez = np.zeros(((K + 2) * (J + 2) * (I + 2),), dtype=np.double)
-            self._Hx = np.zeros(((K + 2) * (J + 2) * (I + 2),), dtype=np.double)
-            self._Hy = np.zeros(((K + 2) * (J + 2) * (I + 2),), dtype=np.double)
-            self._Hz = np.zeros(((K + 2) * (J + 2) * (I + 2),), dtype=np.double)
-            libFDTD.FDTD_set_field_arrays(self._libfdtd,
-                                          self._Ex, self._Ey, self._Ez,
-                                          self._Hx, self._Hy, self._Hz)
 
         if hasattr(self, "_Ex_fwd_t0") == False:
             self._Ex_fwd_t0 = self._da.createGlobalVec()
@@ -1446,15 +1434,6 @@ class FDTD(MaxwellSolver):
 
         pos, lens = self._da.getCorners()
         K, J, I = lens
-        if hasattr(self, "_Ex") == False:
-            self._Ex = np.zeros(((K+2)*(J+2)*(I+2),), dtype=np.double)
-            self._Ey = np.zeros(((K+2)*(J+2)*(I+2),), dtype=np.double)
-            self._Ez = np.zeros(((K+2)*(J+2)*(I+2),), dtype=np.double)
-            self._Hx = np.zeros(((K+2)*(J+2)*(I+2),), dtype=np.double)
-            self._Hy = np.zeros(((K+2)*(J+2)*(I+2),), dtype=np.double)
-            self._Hz = np.zeros(((K+2)*(J+2)*(I+2),), dtype=np.double)
-            libFDTD.FDTD_set_field_arrays(self._libfdtd,
-                    self._Ex, self._Ey, self._Ez, self._Hx, self._Hy, self._Hz)
 
         if hasattr(self, "_Ex_adj_t0") == False:
             self._Ex_adj_t0 = self._da.createGlobalVec()
@@ -1520,20 +1499,8 @@ class FDTD(MaxwellSolver):
         del self._Ex_adj_t1; del self._Ey_adj_t1; del self._Ez_adj_t1
         del self._Hx_adj_t1; del self._Hy_adj_t1; del self._Hz_adj_t1
 
-        # libFDTD.FDTD_block_CUDA_src_free(self._libfdtd)
-
         # update count (for diagnostics)
         self.adjoint_count += 1
-
-        # # free T1 fields
-        # self._Ex_adj_t1.destroy()
-        # self._Ey_adj_t1.destroy()
-        # self._Ez_adj_t1.destroy()
-        # self._Hx_adj_t1.destroy()
-        # self._Hy_adj_t1.destroy()
-        # self._Hz_adj_t1.destroy()
-        # del self._Ex_adj_t1; del self._Ey_adj_t1; del self._Ez_adj_t1
-        # del self._Hx_adj_t1; del self._Hy_adj_t1; del self._Hz_adj_t1
 
     def update_saved_fields(self):
         """Update the fields contained in the regions specified by

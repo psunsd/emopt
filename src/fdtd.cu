@@ -2315,7 +2315,7 @@ void fdtd::FDTD::block_CUDA_multigpu_free()
         gpuErrchk(cudaFree(_kpar_list_host[device_id]->cEy));
         gpuErrchk(cudaFree(_kpar_list_host[device_id]->cEz));
 
-        gpuErrchk(cudaFree(_kpar_list[device_id]));
+        // gpuErrchk(cudaFree(_kpar_list[device_id]));
     }
 }
 
@@ -2555,7 +2555,6 @@ void fdtd::FDTD::set_field_arrays(double *Ex, double *Ey, double *Ez,
 {
     _Ex = Ex; _Ey = Ey; _Ez = Ez;
     _Hx = Hx; _Hy = Hy; _Hz = Hz;
-
 }
 
 void fdtd::FDTD::set_mat_arrays(complex128 *eps_x, complex128 *eps_y, complex128 *eps_z)
@@ -2589,14 +2588,6 @@ void fdtd::FDTD::update_H(int n, double t)
 
     gpuErrchk(cudaMemcpy(_kpar_device, _kpar_host, sizeof(kernelpar), cudaMemcpyHostToDevice));
     kernel_update_H <<< ceil(_I*_J*_K/128.0), 128 >>> (_kpar_device);
-//     kernel_update_H <<< grid, 128 >>> (_kpar_device);
-//     cudaError_t cudaerr = cudaDeviceSynchronize();
-//     printf("update H: kernel launch status \"%s\".\n", cudaGetErrorString(cudaerr));
-
-//     auto start3 = std::chrono::system_clock::now();
-//     auto end3 = std::chrono::system_clock::now();
-//     std::chrono::duration<double> elapsed_src = end3-start3;
-//     std::cout << "Src:" << elapsed_src.count();
 }
 
 void fdtd::FDTD::set_GPUDirect()
@@ -2875,8 +2866,9 @@ void fdtd::FDTD::solve()
                                 *A_change = norm2(A1, A0, _Nconv)/norm2(A0, _Nconv);
                                 *phi_change = norm2(phi1, phi0, _Nconv)/norm2(phi0, _Nconv);
                             }
+                            auto timenow = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
                             std::cout << "Step:" << step << ", A_change:" << *A_change << ", phi_change:"
-                                << *phi_change << std::endl;
+                                << *phi_change << ", Time:" << ctime(&timenow);
                             if (*A_change<=2.0){
                                 *Tn_factor = int(exp(log(*A_change)*0.30103+3.950225));
                                 if(*Tn_factor<1) *Tn_factor = 1;
@@ -3258,32 +3250,8 @@ void fdtd::FDTD::update_E(int n, double t)
     _kpar_host->src_min = _src_min;
     _kpar_host->src_k = _src_k;
 
-//     dim3 block(16,8);
-//     dim3 grid(ceil(_I*_J*_K/128.0/572.0), 572);
-
     gpuErrchk(cudaMemcpy(_kpar_device,_kpar_host, sizeof(kernelpar), cudaMemcpyHostToDevice));
     kernel_update_E <<< ceil(_I*_J*_K/128.0), 128 >>> (_kpar_device);
-//     kernel_update_E <<< grid, 128 >>> (_kpar_device);
-//     cudaError_t cudaerr = cudaDeviceSynchronize();
-//     printf("update E: kernel launch status \"%s\".\n", cudaGetErrorString(cudaerr));
-
-
-//    double sum=0;
-//    double sumbase=0;
-//    unsigned int ui;
-//    uint64_t t0 = __builtin_ia32_rdtscp(&ui);
-//    uint64_t t1 = __builtin_ia32_rdtscp(&ui);
-//    uint64_t elapsed = t1-t0;
-//    sumbase += elapsed;
-//    t0 = __builtin_ia32_rdtscp(&ui);
-
-//    t1 = __builtin_ia32_rdtscp(&ui);
-//    elapsed = t1-t0;
-//    sum += elapsed;
-
-//    std::cout << "Base:" << sumbase << std::endl;
-//    std::cout << "For-loop:" << sum << std::endl;
-
 }
 
 ///////////////////////////////////////////////////////////////////////////

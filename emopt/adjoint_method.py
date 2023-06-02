@@ -504,8 +504,8 @@ class AdjointMethod(with_metaclass(ABCMeta, object)):
         # get the current diagonal elements of A.
         # only these elements change when the design variables change.
 
-        del self.sim._Ex; del self.sim._Ey; del self.sim._Ez
-        del self.sim._Hx; del self.sim._Hy; del self.sim._Hz
+        # del self.sim._Ex; del self.sim._Ey; del self.sim._Ez
+        # del self.sim._Hx; del self.sim._Hy; del self.sim._Hz
         gc.collect()
 
         if self._UseAutoDiff is True:
@@ -1003,8 +1003,8 @@ class AdjointMethodMORE(with_metaclass(ABCMeta, AdjointMethod)):
 
         for am in self._ams:
             foms.append(am.fom(params))
-            del am.sim._Ex; del am.sim._Ey; del am.sim._Ez
-            del am.sim._Hx; del am.sim._Hy; del am.sim._Hz
+            # del am.sim._Ex; del am.sim._Ey; del am.sim._Ez
+            # del am.sim._Hx; del am.sim._Hy; del am.sim._Hz
         gc.collect()
 
         self._foms_current = foms

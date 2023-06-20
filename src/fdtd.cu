@@ -2712,14 +2712,14 @@ void fdtd::FDTD::solve()
                     gpuErrchk(cudaMemcpyAsync(_kpar_list[device_id], _kpar_list_host[device_id], sizeof(kernelpar), cudaMemcpyHostToDevice, compute_stream_list[device_id]));
                     cudaEventRecord(h_time_event_list[device_id], compute_stream_list[device_id]);
 
-                    cudaStreamWaitEvent(compute_stream_list[device_id], h_time_event_list[device_id], 0);
+                    // cudaStreamWaitEvent(compute_stream_list[device_id], h_time_event_list[device_id], 0);
                     cudaStreamWaitEvent(compute_stream_list[device_id], e_border_event_list[device_id], 0);
                     kernel_update_H_bulk <<< _griddim_list[device_id], blockdim, 0, compute_stream_list[device_id] >>> (_kpar_list[device_id]);
-                    cudaEventRecord(h_bulk_event_list[device_id], compute_stream_list[device_id]);
+                    // cudaEventRecord(h_bulk_event_list[device_id], compute_stream_list[device_id]);
 
                     cudaStreamWaitEvent(sync_stream_list[device_id], h_time_event_list[device_id], 0);
-                    cudaStreamWaitEvent(sync_stream_list[device_id], e_bulk_event_list[device_id], 0);
-                    cudaStreamWaitEvent(sync_stream_list[device_id], e_border_event_list[device_id], 0);
+                    // cudaStreamWaitEvent(sync_stream_list[device_id], e_bulk_event_list[device_id], 0);
+                    // cudaStreamWaitEvent(sync_stream_list[device_id], e_border_event_list[device_id], 0);
                     kernel_update_H_border <<< _griddimghost_list[device_id], blockdim, 0, sync_stream_list[device_id] >>> (_kpar_list[device_id]);
                     cudaEventRecord(h_border_event_list[device_id], sync_stream_list[device_id]);
 
@@ -2764,14 +2764,14 @@ void fdtd::FDTD::solve()
                     gpuErrchk(cudaMemcpyAsync(_kpar_list[device_id], _kpar_list_host[device_id], sizeof(kernelpar), cudaMemcpyHostToDevice, compute_stream_list[device_id]));
                     cudaEventRecord(e_time_event_list[device_id], compute_stream_list[device_id]);
 
-                    cudaStreamWaitEvent(compute_stream_list[device_id], e_time_event_list[device_id], 0);
+                    // cudaStreamWaitEvent(compute_stream_list[device_id], e_time_event_list[device_id], 0);
                     cudaStreamWaitEvent(compute_stream_list[device_id], h_border_event_list[device_id], 0);
                     kernel_update_E_bulk <<< _griddim_list[device_id], blockdim, 0, compute_stream_list[device_id] >>> (_kpar_list[device_id]);
-                    cudaEventRecord(e_bulk_event_list[device_id], compute_stream_list[device_id]);
+                    // cudaEventRecord(e_bulk_event_list[device_id], compute_stream_list[device_id]);
 
                     cudaStreamWaitEvent(sync_stream_list[device_id], e_time_event_list[device_id], 0);
-                    cudaStreamWaitEvent(sync_stream_list[device_id], h_bulk_event_list[device_id], 0);
-                    cudaStreamWaitEvent(sync_stream_list[device_id], h_border_event_list[device_id], 0);
+                    // cudaStreamWaitEvent(sync_stream_list[device_id], h_bulk_event_list[device_id], 0);
+                    // cudaStreamWaitEvent(sync_stream_list[device_id], h_border_event_list[device_id], 0);
                     kernel_update_E_border <<< _griddimghost_list[device_id], blockdim, 0, sync_stream_list[device_id] >>> (_kpar_list[device_id]);
                     cudaEventRecord(e_border_event_list[device_id], sync_stream_list[device_id]);
                     
@@ -2902,14 +2902,14 @@ void fdtd::FDTD::solve()
                     gpuErrchk(cudaMemcpyAsync(_kpar_list[device_id], _kpar_list_host[device_id], sizeof(kernelpar), cudaMemcpyHostToDevice, compute_stream_list[device_id]));
                     cudaEventRecord(h_time_event_list[device_id], compute_stream_list[device_id]);
 
-                    cudaStreamWaitEvent(compute_stream_list[device_id], h_time_event_list[device_id], 0);
+                    // cudaStreamWaitEvent(compute_stream_list[device_id], h_time_event_list[device_id], 0);
                     cudaStreamWaitEvent(compute_stream_list[device_id], e_border_event_list[device_id], 0);
                     kernel_update_H_bulk <<< _griddim_list[device_id], blockdim, 0, compute_stream_list[device_id] >>> (_kpar_list[device_id]);
-                    cudaEventRecord(h_bulk_event_list[device_id], compute_stream_list[device_id]);
+                    // cudaEventRecord(h_bulk_event_list[device_id], compute_stream_list[device_id]);
 
                     cudaStreamWaitEvent(sync_stream_list[device_id], h_time_event_list[device_id], 0);
-                    cudaStreamWaitEvent(sync_stream_list[device_id], e_bulk_event_list[device_id], 0);
-                    cudaStreamWaitEvent(sync_stream_list[device_id], e_border_event_list[device_id], 0);
+                    // cudaStreamWaitEvent(sync_stream_list[device_id], e_bulk_event_list[device_id], 0);
+                    // cudaStreamWaitEvent(sync_stream_list[device_id], e_border_event_list[device_id], 0);
                     kernel_update_H_border <<< _griddimghost_list[device_id], blockdim, 0, sync_stream_list[device_id] >>> (_kpar_list[device_id]);
                     cudaEventRecord(h_border_event_list[device_id], sync_stream_list[device_id]);
 
@@ -2954,14 +2954,14 @@ void fdtd::FDTD::solve()
                     gpuErrchk(cudaMemcpyAsync(_kpar_list[device_id], _kpar_list_host[device_id], sizeof(kernelpar), cudaMemcpyHostToDevice, compute_stream_list[device_id]));
                     cudaEventRecord(e_time_event_list[device_id], compute_stream_list[device_id]);
 
-                    cudaStreamWaitEvent(compute_stream_list[device_id], e_time_event_list[device_id], 0);
+                    // cudaStreamWaitEvent(compute_stream_list[device_id], e_time_event_list[device_id], 0);
                     cudaStreamWaitEvent(compute_stream_list[device_id], h_border_event_list[device_id], 0);
                     kernel_update_E_bulk <<< _griddim_list[device_id], blockdim, 0, compute_stream_list[device_id] >>> (_kpar_list[device_id]);
-                    cudaEventRecord(e_bulk_event_list[device_id], compute_stream_list[device_id]);
+                    // cudaEventRecord(e_bulk_event_list[device_id], compute_stream_list[device_id]);
 
                     cudaStreamWaitEvent(sync_stream_list[device_id], e_time_event_list[device_id], 0);
-                    cudaStreamWaitEvent(sync_stream_list[device_id], h_bulk_event_list[device_id], 0);
-                    cudaStreamWaitEvent(sync_stream_list[device_id], h_border_event_list[device_id], 0);
+                    // cudaStreamWaitEvent(sync_stream_list[device_id], h_bulk_event_list[device_id], 0);
+                    // cudaStreamWaitEvent(sync_stream_list[device_id], h_border_event_list[device_id], 0);
                     kernel_update_E_border <<< _griddimghost_list[device_id], blockdim, 0, sync_stream_list[device_id] >>> (_kpar_list[device_id]);
                     cudaEventRecord(e_border_event_list[device_id], sync_stream_list[device_id]);
                     
@@ -3031,14 +3031,14 @@ void fdtd::FDTD::solve()
                     gpuErrchk(cudaMemcpyAsync(_kpar_list[device_id], _kpar_list_host[device_id], sizeof(kernelpar), cudaMemcpyHostToDevice, compute_stream_list[device_id]));
                     cudaEventRecord(h_time_event_list[device_id], compute_stream_list[device_id]);
 
-                    cudaStreamWaitEvent(compute_stream_list[device_id], h_time_event_list[device_id], 0);
+                    // cudaStreamWaitEvent(compute_stream_list[device_id], h_time_event_list[device_id], 0);
                     cudaStreamWaitEvent(compute_stream_list[device_id], e_border_event_list[device_id], 0);
                     kernel_update_H_bulk <<< _griddim_list[device_id], blockdim, 0, compute_stream_list[device_id] >>> (_kpar_list[device_id]);
-                    cudaEventRecord(h_bulk_event_list[device_id], compute_stream_list[device_id]);
+                    // cudaEventRecord(h_bulk_event_list[device_id], compute_stream_list[device_id]);
 
                     cudaStreamWaitEvent(sync_stream_list[device_id], h_time_event_list[device_id], 0);
-                    cudaStreamWaitEvent(sync_stream_list[device_id], e_bulk_event_list[device_id], 0);
-                    cudaStreamWaitEvent(sync_stream_list[device_id], e_border_event_list[device_id], 0);
+                    // cudaStreamWaitEvent(sync_stream_list[device_id], e_bulk_event_list[device_id], 0);
+                    // cudaStreamWaitEvent(sync_stream_list[device_id], e_border_event_list[device_id], 0);
                     kernel_update_H_border <<< _griddimghost_list[device_id], blockdim, 0, sync_stream_list[device_id] >>> (_kpar_list[device_id]);
                     cudaEventRecord(h_border_event_list[device_id], sync_stream_list[device_id]);
 
@@ -3083,14 +3083,14 @@ void fdtd::FDTD::solve()
                     gpuErrchk(cudaMemcpyAsync(_kpar_list[device_id], _kpar_list_host[device_id], sizeof(kernelpar), cudaMemcpyHostToDevice, compute_stream_list[device_id]));
                     cudaEventRecord(e_time_event_list[device_id], compute_stream_list[device_id]);
 
-                    cudaStreamWaitEvent(compute_stream_list[device_id], e_time_event_list[device_id], 0);
+                    // cudaStreamWaitEvent(compute_stream_list[device_id], e_time_event_list[device_id], 0);
                     cudaStreamWaitEvent(compute_stream_list[device_id], h_border_event_list[device_id], 0);
                     kernel_update_E_bulk <<< _griddim_list[device_id], blockdim, 0, compute_stream_list[device_id] >>> (_kpar_list[device_id]);
-                    cudaEventRecord(e_bulk_event_list[device_id], compute_stream_list[device_id]);
+                    // cudaEventRecord(e_bulk_event_list[device_id], compute_stream_list[device_id]);
 
                     cudaStreamWaitEvent(sync_stream_list[device_id], e_time_event_list[device_id], 0);
-                    cudaStreamWaitEvent(sync_stream_list[device_id], h_bulk_event_list[device_id], 0);
-                    cudaStreamWaitEvent(sync_stream_list[device_id], h_border_event_list[device_id], 0);
+                    // cudaStreamWaitEvent(sync_stream_list[device_id], h_bulk_event_list[device_id], 0);
+                    // cudaStreamWaitEvent(sync_stream_list[device_id], h_border_event_list[device_id], 0);
                     kernel_update_E_border <<< _griddimghost_list[device_id], blockdim, 0, sync_stream_list[device_id] >>> (_kpar_list[device_id]);
                     cudaEventRecord(e_border_event_list[device_id], sync_stream_list[device_id]);
                     

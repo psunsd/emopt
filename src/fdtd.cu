@@ -2592,19 +2592,31 @@ void fdtd::FDTD::update_H(int n, double t)
 
 void fdtd::FDTD::set_GPUDirect()
 {
-    // Prepare NVLink
-    std::vector<std::thread> threads_nvlink;
-    threads_nvlink.reserve(_gpus_count);
-    for(int device_id=0; device_id<_gpus_count; device_id++)
-    {
-        threads_nvlink.emplace_back([=](){
-            try{ prepare_nvlink(device_id, _gpus_count); }
-            catch(std::runtime_error &error){ std::cerr << "Error in thread " << device_id << ":" << error.what() << std::endl; }
-        });
+    // Detect GPU Direct status
+    int perfRank{0};
+    bool P2P_AllEnabled{true};
+    for(int src_id=0; src_id<_gpus_count; src_id++){
+        for(int dst_id=src_id+1; dst_id<_gpus_count; dst_id++){
+            gpuErrchk(cudaDeviceGetP2PAttribute(&perfRank, cudaDevP2PAttrAccessSupported, src_id, dst_id));
+            P2P_AllEnabled = P2P_AllEnabled && perfRank;
+        }
     }
-    for(auto &thread: threads_nvlink)
-        thread.join();
 
+    // Prepare GPU Direct only when not all GPU pairs have P2P enabled
+    if(!P2P_AllEnabled){
+        std::vector<std::thread> threads_nvlink;
+        threads_nvlink.reserve(_gpus_count);
+        for(int device_id=0; device_id<_gpus_count; device_id++)
+        {
+            threads_nvlink.emplace_back([=](){
+                try{ prepare_nvlink(device_id, _gpus_count); }
+                catch(std::runtime_error &error){ std::cerr << "Error in thread " << device_id << ":" << error.what() << std::endl; }
+            });
+        }
+        for(auto &thread: threads_nvlink)
+            thread.join();
+    }
+    // Validate whether GPU Direct works 
     if(_gpus_count>1) cudaP2PAssert(&_P2Pworking);
     if(!_P2Pworking)
         std::cout << "P2P not working. Fallback to host-to-device copy." << std::endl;

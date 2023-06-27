@@ -197,6 +197,11 @@ void cudaP2PAssert(int* _P2Pworking)
         *_P2Pworking = 1;
     else
         *_P2Pworking = 0; 
+
+    for(int device_id=0; device_id<Ngpus; device_id++){
+        gpuErrchk(cudaFree(d_sender_list[device_id]));
+        gpuErrchk(cudaFree(d_receiver_list[device_id]));
+    }
 }
 
 template <typename T>
@@ -1732,7 +1737,7 @@ fdtd::FDTD::~FDTD()
 
     delete [] _kpar_host;
 
-    cudaFree(_kpar_device);
+    gpuErrchk(cudaFree(_kpar_device));
 
 }
 
@@ -2256,6 +2261,9 @@ void fdtd::FDTD::block_CUDA_multigpu_init()
         gpuErrchk(cudaMemcpy(_kpar_list[device_id], _kpar_host, sizeof(kernelpar), cudaMemcpyHostToDevice));
         _kpar_list_host[device_id] = _kpar_host;
     }
+
+    // Free up memory
+    delete[] _i0s; delete[] _j0s; delete[] _k0s; delete[] _Is; delete[] _Js; delete[] _Ks;
 }
 
 void fdtd::FDTD::block_CUDA_multigpu_free()
@@ -2314,6 +2322,32 @@ void fdtd::FDTD::block_CUDA_multigpu_free()
         gpuErrchk(cudaFree(_kpar_list_host[device_id]->cEx));
         gpuErrchk(cudaFree(_kpar_list_host[device_id]->cEy));
         gpuErrchk(cudaFree(_kpar_list_host[device_id]->cEz));
+
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->pml_Exy0));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->pml_Exy1));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->pml_Exz0));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->pml_Exz1));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->pml_Eyx0));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->pml_Eyx1));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->pml_Eyz0));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->pml_Eyz1));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->pml_Ezx0));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->pml_Ezx1));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->pml_Ezy0));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->pml_Ezy1));
+
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->pml_Hxy0));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->pml_Hxy1));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->pml_Hxz0));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->pml_Hxz1));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->pml_Hyx0));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->pml_Hyx1));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->pml_Hyz0));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->pml_Hyz1));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->pml_Hzx0));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->pml_Hzx1));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->pml_Hzy0));
+        gpuErrchk(cudaFree(_kpar_list_host[device_id]->pml_Hzy1));
 
         // gpuErrchk(cudaFree(_kpar_list[device_id]));
     }
@@ -3226,8 +3260,8 @@ void fdtd::FDTD::solve()
                 } // Calculate complex fields ends
 
                 // Free up memory
-                delete[] Ext; delete[] Eyt; delete[] Ezt;
-                delete[] Hxt; delete[] Hyt; delete[] Hzt;
+                delete[] Ext; delete[] Eyt; delete[] Ezt; delete[] Hxt; delete[] Hyt; delete[] Hzt;
+                delete[] Emid_list[device_id];
             }  // try
             catch(std::runtime_error &error){
                 std::cerr << "FDTD error in thread " << device_id << ":" << error.what() << std::endl;

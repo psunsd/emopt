@@ -138,7 +138,8 @@ void prepare_nvlink (int device_id, int gpus_count)
 			gpuErrchk(cudaDeviceCanAccessPeer (&can_access_other_device, device_id, other_device_id));
 			if (can_access_other_device)
 			{
-				gpuErrchk(cudaDeviceEnablePeerAccess (other_device_id, 0));
+                // No gpuErrchk here to avoid unnecessary "peer access already enabled" error/exit
+				cudaDeviceEnablePeerAccess (other_device_id, 0);
 			}
 			else
 			{
@@ -2657,19 +2658,19 @@ void fdtd::FDTD::set_GPUDirect()
     }
 
     // Prepare GPU Direct only when not all GPU pairs have P2P enabled
-    if(!P2P_AllEnabled){
-        std::vector<std::thread> threads_nvlink;
-        threads_nvlink.reserve(_gpus_count);
-        for(int device_id=0; device_id<_gpus_count; device_id++)
-        {
-            threads_nvlink.emplace_back([=](){
-                try{ prepare_nvlink(device_id, _gpus_count); }
-                catch(std::runtime_error &error){ std::cerr << "Error in thread " << device_id << ":" << error.what() << std::endl; }
-            });
-        }
-        for(auto &thread: threads_nvlink)
-            thread.join();
+    // if(!P2P_AllEnabled){
+    std::vector<std::thread> threads_nvlink;
+    threads_nvlink.reserve(_gpus_count);
+    for(int device_id=0; device_id<_gpus_count; device_id++)
+    {
+        threads_nvlink.emplace_back([=](){
+            try{ prepare_nvlink(device_id, _gpus_count); }
+            catch(std::runtime_error &error){ std::cerr << "Error in thread " << device_id << ":" << error.what() << std::endl; }
+        });
     }
+    for(auto &thread: threads_nvlink)
+        thread.join();
+    // }
     // Validate whether GPU Direct works 
     if(_gpus_count>1) cudaP2PAssert(&_P2Pworking);
     if(!_P2Pworking)
@@ -2742,7 +2743,8 @@ void fdtd::FDTD::solve()
 
     double *A_change = new double{1.0f};
     double *phi_change = new double{1.0f};
-    int *Tn_factor = new int{64};
+    int *Tn_factor = new int{300};
+    *Tn_factor = int(sqrt(pow(_X, 2) + pow(_Y, 2) +pow(_Z, 2))*12.2);
     int Tn = int(_Ncycle*3/4);
     double amp_rtol{_rtol}, phi_rtol{sqrt(_rtol)};
 
@@ -2935,10 +2937,10 @@ void fdtd::FDTD::solve()
                             auto timenow = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
                             std::cout << "Step:" << step << ", A_change:" << *A_change << ", phi_change:"
                                 << *phi_change << ", Time:" << ctime(&timenow);
-                            if (*A_change<=2.0){
-                                *Tn_factor = int(exp(log(*A_change)*0.30103+3.950225));
-                                if(*Tn_factor<1) *Tn_factor = 1;
-                            }
+                            // if (*A_change<=2.0){
+                            *Tn_factor = int(exp(log(*A_change)*0.30103+3.950225));
+                            if(*Tn_factor<1) *Tn_factor = 1;
+                            // }
                         }
                         Barrier(counter_conv2, mutex_conv2, cv_conv2, _gpus_count);
                     }else{

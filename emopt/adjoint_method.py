@@ -685,22 +685,24 @@ class AdjointMethod(with_metaclass(ABCMeta, object)):
         dFdx = self.calc_dFdx(self.sim, params)
 
         # Reduce memory footprint of sim._E_fwd_t0 after dFdx calculation
-        self.sim._Hx_fwd_t0.destroy()
-        self.sim._Hy_fwd_t0.destroy()
-        self.sim._Hz_fwd_t0.destroy()
-        del self.sim._Hx_fwd_t0;
-        del self.sim._Hy_fwd_t0;
-        del self.sim._Hz_fwd_t0
+        #self.sim._Hx_fwd_t0.destroy()
+        #self.sim._Hy_fwd_t0.destroy()
+        #self.sim._Hz_fwd_t0.destroy()
+        #del self.sim._Hx_fwd_t0
+        #del self.sim._Hy_fwd_t0
+        #del self.sim._Hz_fwd_t0
 
         self.sim._Ex_fwd_t0_pbox = self.sim._dap.createGlobalVec()
         self.sim._Ey_fwd_t0_pbox = self.sim._dap.createGlobalVec()
         self.sim._Ez_fwd_t0_pbox = self.sim._dap.createGlobalVec()
         self.sim.get_pbox_field_fwd()
 
-        self.sim._Ex_fwd_t0.destroy()
-        self.sim._Ey_fwd_t0.destroy()
-        self.sim._Ez_fwd_t0.destroy()
-        del self.sim._Ex_fwd_t0; del self.sim._Ey_fwd_t0; del self.sim._Ez_fwd_t0
+        #self.sim._Ex_fwd_t0.destroy()
+        #self.sim._Ey_fwd_t0.destroy()
+        #self.sim._Ez_fwd_t0.destroy()
+        #del self.sim._Ex_fwd_t0
+        #del self.sim._Ey_fwd_t0
+        #del self.sim._Ez_fwd_t0
 
         #if(isinstance(self.sim, fdfd.FDFD_TE)):
         dFdx = comm.bcast(dFdx, root=0)

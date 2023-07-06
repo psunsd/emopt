@@ -60,7 +60,7 @@ import numpy as np
 
 __author__ = "Andrew Michaels"
 __license__ = "BSD-3"
-__version__ = "2019.5.6"
+__version__ = "2023.1.16"
 __maintainer__ = "Andrew Michaels"
 __status__ = "development"
 
@@ -1331,12 +1331,12 @@ class ModeFullVector(ModeSolver):
                 get_mu_y = lambda x,y : mu.get_value(k0,j0+x+0.5,i0+y-0.5)
                 get_mu_z = lambda x,y : mu.get_value(k0,j0+x+0.5,i0+y)
             elif(self.ndir == 'y'):
-                get_eps_x = lambda x,y : eps.get_value(k0+y,j0,i0+x)
-                get_eps_y = lambda x,y : eps.get_value(k0+y+0.5,j0,i0+x-0.5)
-                get_eps_z = lambda x,y : eps.get_value(k0+y,j0,i0+x-0.5)
-                get_mu_x = lambda x,y : mu.get_value(k0+y+0.5,j0,i0+x-0.5)
-                get_mu_y = lambda x,y : mu.get_value(k0+y,j0,i0+x)
-                get_mu_z = lambda x,y : mu.get_value(k0+y+0.5,j0,i0+x)
+                get_eps_x = lambda x,y : eps.get_value(k0+x,j0,i0+y)
+                get_eps_y = lambda x,y : eps.get_value(k0+x+0.5,j0,i0+y-0.5)
+                get_eps_z = lambda x,y : eps.get_value(k0+x,j0,i0+y-0.5)
+                get_mu_x = lambda x,y : mu.get_value(k0+x+0.5,j0,i0+y-0.5)
+                get_mu_y = lambda x,y : mu.get_value(k0+x,j0,i0+y)
+                get_mu_z = lambda x,y : mu.get_value(k0+x+0.5,j0,i0+y)
             elif(self.ndir == 'z'):
                 get_eps_x = lambda x,y : eps.get_value(k0+x,j0+y,i0)
                 get_eps_y = lambda x,y : eps.get_value(k0+x,j0+y,i0)
@@ -1935,7 +1935,7 @@ class ModeFullVector(ModeSolver):
         # All field components are interpolated onto the Ez grid.
         if(NOT_PARALLEL):
             if(component == FieldComponent.Ex): # Ex --> don't average
-                return fraw[1:-1, 1:-1]
+                return f_raw[1:-1, 1:-1]
 
             elif(component == FieldComponent.Ey): # Ey --> average x & y
                 Ey = np.copy(f_raw)
@@ -1964,7 +1964,7 @@ class ModeFullVector(ModeSolver):
                 return Hx[1:-1, 1:-1]/4.0
 
             elif(component == FieldComponent.Hy): # Hy --> don't average
-                return f_raw
+                return f_raw[1:-1, 1:-1]
 
             elif(component == FieldComponent.Hz): # Hz --> average along x
                 Hz = np.copy(f_raw)

@@ -98,7 +98,7 @@ inline double norm2(double *mat, double *mat2, int len)
     return sqrt(sum);
 }
 
-inline double calc_phase(double t0, double t1, double t2, double f0, double f1, double f2)
+__host__ __device__ inline double calc_phase(double t0, double t1, double t2, double f0, double f1, double f2)
 {
     double f10=f1-f0, f21=f2-f1;
     double ret{0.0f};
@@ -110,7 +110,7 @@ inline double calc_phase(double t0, double t1, double t2, double f0, double f1, 
     } 
 }
 
-inline double calc_amplitude(double t0, double t1, double t2, double f0, double f1, double f2, double phase)
+__host__ __device__ inline double calc_amplitude(double t0, double t1, double t2, double f0, double f1, double f2, double phase)
 {
     double f10=f1-f0, f21=f2-f1;
     double ret;
@@ -229,6 +229,21 @@ __global__ void kernel_copy_eps(kernelpar *kpar)
     kpar->epsz[ind_global] = kpar->epsz_full[(i+kpar->i0)*kpar->Ny*kpar->Nx + (j+kpar->j0)*kpar->Nx + k + kpar->k0];
 }
 
+__global__ void kernel_calc_complex_fields(double t0, double t1, double t2, double *F_t0, double *F_t1, double *F_t2, size_t len, complex128 *F_out)
+{
+    size_t ind_global = blockIdx.x * blockDim.x + threadIdx.x;
+    if (ind_global >= len) return;
+    double f0, f1, f2, phi, A;
+    f0 = F_t0[ind_global];
+    f1 = F_t1[ind_global];
+    f2 = F_t2[ind_global];
+    phi = calc_phase(t0, t1, t2, f0, f1, f2);
+    A = calc_amplitude(t0, t1, t2, f0, f1, f2, phi);
+    if(A<0) {A*=-1; phi+=M_PI;}
+    F_out[ind_global].real = A*cos(phi);
+    F_out[ind_global].imag = -A*sin(phi);
+
+}
 
 __global__ void kernel_update_H(kernelpar *kpar)
 {
@@ -2752,6 +2767,10 @@ void fdtd::FDTD::solve()
     std::vector<std::thread> threads_kernels;
     threads_kernels.reserve(_gpus_count);
     signal(SIGINT, signal_callback_handler);
+
+    auto timenow = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    std::cout << "Start FDTD:" << ctime(&timenow);
+
     for(int device_id=0; device_id<_gpus_count; device_id++)
     {
         threads_kernels.emplace_back([=](){
@@ -2780,14 +2799,10 @@ void fdtd::FDTD::solve()
                     gpuErrchk(cudaMemcpyAsync(_kpar_list[device_id], _kpar_list_host[device_id], sizeof(kernelpar), cudaMemcpyHostToDevice, compute_stream_list[device_id]));
                     cudaEventRecord(h_time_event_list[device_id], compute_stream_list[device_id]);
 
-                    // cudaStreamWaitEvent(compute_stream_list[device_id], h_time_event_list[device_id], 0);
                     cudaStreamWaitEvent(compute_stream_list[device_id], e_border_event_list[device_id], 0);
                     kernel_update_H_bulk <<< _griddim_list[device_id], blockdim, 0, compute_stream_list[device_id] >>> (_kpar_list[device_id]);
-                    // cudaEventRecord(h_bulk_event_list[device_id], compute_stream_list[device_id]);
 
                     cudaStreamWaitEvent(sync_stream_list[device_id], h_time_event_list[device_id], 0);
-                    // cudaStreamWaitEvent(sync_stream_list[device_id], e_bulk_event_list[device_id], 0);
-                    // cudaStreamWaitEvent(sync_stream_list[device_id], e_border_event_list[device_id], 0);
                     kernel_update_H_border <<< _griddimghost_list[device_id], blockdim, 0, sync_stream_list[device_id] >>> (_kpar_list[device_id]);
                     cudaEventRecord(h_border_event_list[device_id], sync_stream_list[device_id]);
 
@@ -2832,14 +2847,10 @@ void fdtd::FDTD::solve()
                     gpuErrchk(cudaMemcpyAsync(_kpar_list[device_id], _kpar_list_host[device_id], sizeof(kernelpar), cudaMemcpyHostToDevice, compute_stream_list[device_id]));
                     cudaEventRecord(e_time_event_list[device_id], compute_stream_list[device_id]);
 
-                    // cudaStreamWaitEvent(compute_stream_list[device_id], e_time_event_list[device_id], 0);
                     cudaStreamWaitEvent(compute_stream_list[device_id], h_border_event_list[device_id], 0);
                     kernel_update_E_bulk <<< _griddim_list[device_id], blockdim, 0, compute_stream_list[device_id] >>> (_kpar_list[device_id]);
-                    // cudaEventRecord(e_bulk_event_list[device_id], compute_stream_list[device_id]);
 
                     cudaStreamWaitEvent(sync_stream_list[device_id], e_time_event_list[device_id], 0);
-                    // cudaStreamWaitEvent(sync_stream_list[device_id], h_bulk_event_list[device_id], 0);
-                    // cudaStreamWaitEvent(sync_stream_list[device_id], h_border_event_list[device_id], 0);
                     kernel_update_E_border <<< _griddimghost_list[device_id], blockdim, 0, sync_stream_list[device_id] >>> (_kpar_list[device_id]);
                     cudaEventRecord(e_border_event_list[device_id], sync_stream_list[device_id]);
                     
@@ -2935,8 +2946,8 @@ void fdtd::FDTD::solve()
                                 *phi_change = norm2(phi1, phi0, _Nconv)/norm2(phi0, _Nconv);
                             }
                             auto timenow = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-                            std::cout << "Step:" << step << ", A_change:" << *A_change << ", phi_change:"
-                                << *phi_change << ", Time:" << ctime(&timenow);
+                            std::cout << "Step:" << step << ", A_change:" << *A_change << ", phi_change:" << *phi_change << ", Time:" << ctime(&timenow);
+
                             // if (*A_change<=2.0){
                             *Tn_factor = int(exp(log(*A_change)*0.30103+3.950225));
                             if(*Tn_factor<1) *Tn_factor = 1;
@@ -2950,18 +2961,39 @@ void fdtd::FDTD::solve()
                 }  // while end
 
                 // FDTD_capture_t0_fields
-                for(int ii=0; ii<It; ii++){
-                    for(int jj=0; jj<Jt; jj++){
-                        for(int kk=0; kk<Kt; kk++){
-                            _Ex_t0[(ii+i0t)*J*K+(jj+j0t)*K+kk+k0t] = Ext[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+kk+1];
-                            _Ey_t0[(ii+i0t)*J*K+(jj+j0t)*K+kk+k0t] = Eyt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+kk+1];
-                            _Ez_t0[(ii+i0t)*J*K+(jj+j0t)*K+kk+k0t] = Ezt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+kk+1];
-                            _Hx_t0[(ii+i0t)*J*K+(jj+j0t)*K+kk+k0t] = Hxt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+kk+1];
-                            _Hy_t0[(ii+i0t)*J*K+(jj+j0t)*K+kk+k0t] = Hyt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+kk+1];
-                            _Hz_t0[(ii+i0t)*J*K+(jj+j0t)*K+kk+k0t] = Hzt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+kk+1];
-                        }
-                    }
-                } // FDTD_capture_t0_fields end
+                // for(int ii=0; ii<It; ii++){
+                //     for(int jj=0; jj<Jt; jj++){
+                //         for(int kk=0; kk<Kt; kk++){
+                //             _Ex_t0[(ii+i0t)*J*K+(jj+j0t)*K+kk+k0t] = Ext[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+kk+1];
+                //             _Ey_t0[(ii+i0t)*J*K+(jj+j0t)*K+kk+k0t] = Eyt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+kk+1];
+                //             _Ez_t0[(ii+i0t)*J*K+(jj+j0t)*K+kk+k0t] = Ezt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+kk+1];
+                //             _Hx_t0[(ii+i0t)*J*K+(jj+j0t)*K+kk+k0t] = Hxt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+kk+1];
+                //             _Hy_t0[(ii+i0t)*J*K+(jj+j0t)*K+kk+k0t] = Hyt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+kk+1];
+                //             _Hz_t0[(ii+i0t)*J*K+(jj+j0t)*K+kk+k0t] = Hzt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+kk+1];
+                //         }
+                //     }
+                // } // FDTD_capture_t0_fields end
+
+                // capture t0 fields on GPUs
+                double *dEx_t0, *dEy_t0, *dEz_t0, *dHx_t0, *dHy_t0, *dHz_t0;
+                gpuErrchk(cudaMalloc((void **)&dEx_t0, (It+2)*(Jt+2)*(Kt+2)*sizeof(double)));
+                gpuErrchk(cudaMalloc((void **)&dEy_t0, (It+2)*(Jt+2)*(Kt+2)*sizeof(double)));
+                gpuErrchk(cudaMalloc((void **)&dEz_t0, (It+2)*(Jt+2)*(Kt+2)*sizeof(double)));
+                gpuErrchk(cudaMalloc((void **)&dHx_t0, (It+2)*(Jt+2)*(Kt+2)*sizeof(double)));
+                gpuErrchk(cudaMalloc((void **)&dHy_t0, (It+2)*(Jt+2)*(Kt+2)*sizeof(double)));
+                gpuErrchk(cudaMalloc((void **)&dHz_t0, (It+2)*(Jt+2)*(Kt+2)*sizeof(double)));
+                // gpuErrchk(cudaMemcpy(dEx_t0, Ext, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyHostToDevice));
+                // gpuErrchk(cudaMemcpy(dEy_t0, Eyt, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyHostToDevice));
+                // gpuErrchk(cudaMemcpy(dEz_t0, Ezt, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyHostToDevice));
+                // gpuErrchk(cudaMemcpy(dHx_t0, Hxt, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyHostToDevice));
+                // gpuErrchk(cudaMemcpy(dHy_t0, Hyt, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyHostToDevice));
+                // gpuErrchk(cudaMemcpy(dHz_t0, Hzt, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyHostToDevice));
+                gpuErrchk(cudaMemcpy(dEx_t0, _kpar_list_host[device_id]->Ex, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToDevice));
+                gpuErrchk(cudaMemcpy(dEy_t0, _kpar_list_host[device_id]->Ey, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToDevice));
+                gpuErrchk(cudaMemcpy(dEz_t0, _kpar_list_host[device_id]->Ez, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToDevice));
+                gpuErrchk(cudaMemcpy(dHx_t0, _kpar_list_host[device_id]->Hx, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToDevice));
+                gpuErrchk(cudaMemcpy(dHy_t0, _kpar_list_host[device_id]->Hy, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToDevice));
+                gpuErrchk(cudaMemcpy(dHz_t0, _kpar_list_host[device_id]->Hz, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToDevice));
 
                 // Perform another Tn steps to get a second time point at t1
                 for(int step1=0; step1<Tn; step1++){
@@ -2970,14 +3002,10 @@ void fdtd::FDTD::solve()
                     gpuErrchk(cudaMemcpyAsync(_kpar_list[device_id], _kpar_list_host[device_id], sizeof(kernelpar), cudaMemcpyHostToDevice, compute_stream_list[device_id]));
                     cudaEventRecord(h_time_event_list[device_id], compute_stream_list[device_id]);
 
-                    // cudaStreamWaitEvent(compute_stream_list[device_id], h_time_event_list[device_id], 0);
                     cudaStreamWaitEvent(compute_stream_list[device_id], e_border_event_list[device_id], 0);
                     kernel_update_H_bulk <<< _griddim_list[device_id], blockdim, 0, compute_stream_list[device_id] >>> (_kpar_list[device_id]);
-                    // cudaEventRecord(h_bulk_event_list[device_id], compute_stream_list[device_id]);
 
                     cudaStreamWaitEvent(sync_stream_list[device_id], h_time_event_list[device_id], 0);
-                    // cudaStreamWaitEvent(sync_stream_list[device_id], e_bulk_event_list[device_id], 0);
-                    // cudaStreamWaitEvent(sync_stream_list[device_id], e_border_event_list[device_id], 0);
                     kernel_update_H_border <<< _griddimghost_list[device_id], blockdim, 0, sync_stream_list[device_id] >>> (_kpar_list[device_id]);
                     cudaEventRecord(h_border_event_list[device_id], sync_stream_list[device_id]);
 
@@ -3022,14 +3050,10 @@ void fdtd::FDTD::solve()
                     gpuErrchk(cudaMemcpyAsync(_kpar_list[device_id], _kpar_list_host[device_id], sizeof(kernelpar), cudaMemcpyHostToDevice, compute_stream_list[device_id]));
                     cudaEventRecord(e_time_event_list[device_id], compute_stream_list[device_id]);
 
-                    // cudaStreamWaitEvent(compute_stream_list[device_id], e_time_event_list[device_id], 0);
                     cudaStreamWaitEvent(compute_stream_list[device_id], h_border_event_list[device_id], 0);
                     kernel_update_E_bulk <<< _griddim_list[device_id], blockdim, 0, compute_stream_list[device_id] >>> (_kpar_list[device_id]);
-                    // cudaEventRecord(e_bulk_event_list[device_id], compute_stream_list[device_id]);
 
                     cudaStreamWaitEvent(sync_stream_list[device_id], e_time_event_list[device_id], 0);
-                    // cudaStreamWaitEvent(sync_stream_list[device_id], h_bulk_event_list[device_id], 0);
-                    // cudaStreamWaitEvent(sync_stream_list[device_id], h_border_event_list[device_id], 0);
                     kernel_update_E_border <<< _griddimghost_list[device_id], blockdim, 0, sync_stream_list[device_id] >>> (_kpar_list[device_id]);
                     cudaEventRecord(e_border_event_list[device_id], sync_stream_list[device_id]);
                     
@@ -3073,24 +3097,45 @@ void fdtd::FDTD::solve()
                 
                 // FDTD_capture_t1_fields
                 Barrier(counter_t1, mutex_t1, cv_t1, _gpus_count);
-                gpuErrchk(cudaMemcpy(Ext, _kpar_list_host[device_id]->Ex, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToHost));
-                gpuErrchk(cudaMemcpy(Eyt, _kpar_list_host[device_id]->Ey, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToHost));
-                gpuErrchk(cudaMemcpy(Ezt, _kpar_list_host[device_id]->Ez, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToHost));
-                gpuErrchk(cudaMemcpy(Hxt, _kpar_list_host[device_id]->Hx, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToHost));
-                gpuErrchk(cudaMemcpy(Hyt, _kpar_list_host[device_id]->Hy, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToHost));
-                gpuErrchk(cudaMemcpy(Hzt, _kpar_list_host[device_id]->Hz, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToHost));
-                for(int ii=0; ii<It; ii++){
-                    for(int jj=0; jj<Jt; jj++){
-                        for(int kk=0; kk<Kt; kk++){
-                            _Ex_t1[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)] = Ext[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+(kk+1)];
-                            _Ey_t1[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)] = Eyt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+(kk+1)];
-                            _Ez_t1[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)] = Ezt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+(kk+1)];
-                            _Hx_t1[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)] = Hxt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+(kk+1)];
-                            _Hy_t1[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)] = Hyt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+(kk+1)];
-                            _Hz_t1[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)] = Hzt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+(kk+1)];
-                        }
-                    }
-                }
+                // gpuErrchk(cudaMemcpy(Ext, _kpar_list_host[device_id]->Ex, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToHost));
+                // gpuErrchk(cudaMemcpy(Eyt, _kpar_list_host[device_id]->Ey, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToHost));
+                // gpuErrchk(cudaMemcpy(Ezt, _kpar_list_host[device_id]->Ez, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToHost));
+                // gpuErrchk(cudaMemcpy(Hxt, _kpar_list_host[device_id]->Hx, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToHost));
+                // gpuErrchk(cudaMemcpy(Hyt, _kpar_list_host[device_id]->Hy, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToHost));
+                // gpuErrchk(cudaMemcpy(Hzt, _kpar_list_host[device_id]->Hz, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToHost));
+                // for(int ii=0; ii<It; ii++){
+                //     for(int jj=0; jj<Jt; jj++){
+                //         for(int kk=0; kk<Kt; kk++){
+                //             _Ex_t1[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)] = Ext[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+(kk+1)];
+                //             _Ey_t1[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)] = Eyt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+(kk+1)];
+                //             _Ez_t1[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)] = Ezt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+(kk+1)];
+                //             _Hx_t1[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)] = Hxt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+(kk+1)];
+                //             _Hy_t1[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)] = Hyt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+(kk+1)];
+                //             _Hz_t1[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)] = Hzt[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+(kk+1)];
+                //         }
+                //     }
+                // }
+
+                // capture t1 fields on GPUs
+                double *dEx_t1, *dEy_t1, *dEz_t1, *dHx_t1, *dHy_t1, *dHz_t1;
+                gpuErrchk(cudaMalloc((void **)&dEx_t1, (It+2)*(Jt+2)*(Kt+2)*sizeof(double)));
+                gpuErrchk(cudaMalloc((void **)&dEy_t1, (It+2)*(Jt+2)*(Kt+2)*sizeof(double)));
+                gpuErrchk(cudaMalloc((void **)&dEz_t1, (It+2)*(Jt+2)*(Kt+2)*sizeof(double)));
+                gpuErrchk(cudaMalloc((void **)&dHx_t1, (It+2)*(Jt+2)*(Kt+2)*sizeof(double)));
+                gpuErrchk(cudaMalloc((void **)&dHy_t1, (It+2)*(Jt+2)*(Kt+2)*sizeof(double)));
+                gpuErrchk(cudaMalloc((void **)&dHz_t1, (It+2)*(Jt+2)*(Kt+2)*sizeof(double)));
+                // gpuErrchk(cudaMemcpy(dEx_t1, Ext, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyHostToDevice));
+                // gpuErrchk(cudaMemcpy(dEy_t1, Eyt, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyHostToDevice));
+                // gpuErrchk(cudaMemcpy(dEz_t1, Ezt, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyHostToDevice));
+                // gpuErrchk(cudaMemcpy(dHx_t1, Hxt, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyHostToDevice));
+                // gpuErrchk(cudaMemcpy(dHy_t1, Hyt, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyHostToDevice));
+                // gpuErrchk(cudaMemcpy(dHz_t1, Hzt, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyHostToDevice));
+                gpuErrchk(cudaMemcpy(dEx_t1, _kpar_list_host[device_id]->Ex, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToDevice));
+                gpuErrchk(cudaMemcpy(dEy_t1, _kpar_list_host[device_id]->Ey, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToDevice));
+                gpuErrchk(cudaMemcpy(dEz_t1, _kpar_list_host[device_id]->Ez, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToDevice));
+                gpuErrchk(cudaMemcpy(dHx_t1, _kpar_list_host[device_id]->Hx, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToDevice));
+                gpuErrchk(cudaMemcpy(dHy_t1, _kpar_list_host[device_id]->Hy, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToDevice));
+                gpuErrchk(cudaMemcpy(dHz_t1, _kpar_list_host[device_id]->Hz, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToDevice));
 
                 // Perform another Tn steps to get a third time point at t2
                 for(int step2=0; step2<Tn; step2++){
@@ -3099,14 +3144,10 @@ void fdtd::FDTD::solve()
                     gpuErrchk(cudaMemcpyAsync(_kpar_list[device_id], _kpar_list_host[device_id], sizeof(kernelpar), cudaMemcpyHostToDevice, compute_stream_list[device_id]));
                     cudaEventRecord(h_time_event_list[device_id], compute_stream_list[device_id]);
 
-                    // cudaStreamWaitEvent(compute_stream_list[device_id], h_time_event_list[device_id], 0);
                     cudaStreamWaitEvent(compute_stream_list[device_id], e_border_event_list[device_id], 0);
                     kernel_update_H_bulk <<< _griddim_list[device_id], blockdim, 0, compute_stream_list[device_id] >>> (_kpar_list[device_id]);
-                    // cudaEventRecord(h_bulk_event_list[device_id], compute_stream_list[device_id]);
 
                     cudaStreamWaitEvent(sync_stream_list[device_id], h_time_event_list[device_id], 0);
-                    // cudaStreamWaitEvent(sync_stream_list[device_id], e_bulk_event_list[device_id], 0);
-                    // cudaStreamWaitEvent(sync_stream_list[device_id], e_border_event_list[device_id], 0);
                     kernel_update_H_border <<< _griddimghost_list[device_id], blockdim, 0, sync_stream_list[device_id] >>> (_kpar_list[device_id]);
                     cudaEventRecord(h_border_event_list[device_id], sync_stream_list[device_id]);
 
@@ -3151,14 +3192,10 @@ void fdtd::FDTD::solve()
                     gpuErrchk(cudaMemcpyAsync(_kpar_list[device_id], _kpar_list_host[device_id], sizeof(kernelpar), cudaMemcpyHostToDevice, compute_stream_list[device_id]));
                     cudaEventRecord(e_time_event_list[device_id], compute_stream_list[device_id]);
 
-                    // cudaStreamWaitEvent(compute_stream_list[device_id], e_time_event_list[device_id], 0);
                     cudaStreamWaitEvent(compute_stream_list[device_id], h_border_event_list[device_id], 0);
                     kernel_update_E_bulk <<< _griddim_list[device_id], blockdim, 0, compute_stream_list[device_id] >>> (_kpar_list[device_id]);
-                    // cudaEventRecord(e_bulk_event_list[device_id], compute_stream_list[device_id]);
 
                     cudaStreamWaitEvent(sync_stream_list[device_id], e_time_event_list[device_id], 0);
-                    // cudaStreamWaitEvent(sync_stream_list[device_id], h_bulk_event_list[device_id], 0);
-                    // cudaStreamWaitEvent(sync_stream_list[device_id], h_border_event_list[device_id], 0);
                     kernel_update_E_border <<< _griddimghost_list[device_id], blockdim, 0, sync_stream_list[device_id] >>> (_kpar_list[device_id]);
                     cudaEventRecord(e_border_event_list[device_id], sync_stream_list[device_id]);
                     
@@ -3202,19 +3239,98 @@ void fdtd::FDTD::solve()
 
                 // Capture fields at t2
                 Barrier(counter_t2, mutex_t2, cv_t2, _gpus_count);
-                gpuErrchk(cudaMemcpy(Ext, _kpar_list_host[device_id]->Ex, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToHost));
-                gpuErrchk(cudaMemcpy(Eyt, _kpar_list_host[device_id]->Ey, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToHost));
-                gpuErrchk(cudaMemcpy(Ezt, _kpar_list_host[device_id]->Ez, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToHost));
-                gpuErrchk(cudaMemcpy(Hxt, _kpar_list_host[device_id]->Hx, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToHost));
-                gpuErrchk(cudaMemcpy(Hyt, _kpar_list_host[device_id]->Hy, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToHost));
-                gpuErrchk(cudaMemcpy(Hzt, _kpar_list_host[device_id]->Hz, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToHost));
+                // gpuErrchk(cudaMemcpy(Ext, _kpar_list_host[device_id]->Ex, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToHost));
+                // gpuErrchk(cudaMemcpy(Eyt, _kpar_list_host[device_id]->Ey, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToHost));
+                // gpuErrchk(cudaMemcpy(Ezt, _kpar_list_host[device_id]->Ez, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToHost));
+                // gpuErrchk(cudaMemcpy(Hxt, _kpar_list_host[device_id]->Hx, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToHost));
+                // gpuErrchk(cudaMemcpy(Hyt, _kpar_list_host[device_id]->Hy, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToHost));
+                // gpuErrchk(cudaMemcpy(Hzt, _kpar_list_host[device_id]->Hz, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToHost));
+
+                // capture t2 fields on GPUs
+                double *dEx_t2, *dEy_t2, *dEz_t2, *dHx_t2, *dHy_t2, *dHz_t2;
+                gpuErrchk(cudaMalloc((void **)&dEx_t2, (It+2)*(Jt+2)*(Kt+2)*sizeof(double)));
+                gpuErrchk(cudaMalloc((void **)&dEy_t2, (It+2)*(Jt+2)*(Kt+2)*sizeof(double)));
+                gpuErrchk(cudaMalloc((void **)&dEz_t2, (It+2)*(Jt+2)*(Kt+2)*sizeof(double)));
+                gpuErrchk(cudaMalloc((void **)&dHx_t2, (It+2)*(Jt+2)*(Kt+2)*sizeof(double)));
+                gpuErrchk(cudaMalloc((void **)&dHy_t2, (It+2)*(Jt+2)*(Kt+2)*sizeof(double)));
+                gpuErrchk(cudaMalloc((void **)&dHz_t2, (It+2)*(Jt+2)*(Kt+2)*sizeof(double)));
+                // gpuErrchk(cudaMemcpy(dEx_t2, Ext, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyHostToDevice));
+                // gpuErrchk(cudaMemcpy(dEy_t2, Eyt, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyHostToDevice));
+                // gpuErrchk(cudaMemcpy(dEz_t2, Ezt, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyHostToDevice));
+                // gpuErrchk(cudaMemcpy(dHx_t2, Hxt, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyHostToDevice));
+                // gpuErrchk(cudaMemcpy(dHy_t2, Hyt, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyHostToDevice));
+                // gpuErrchk(cudaMemcpy(dHz_t2, Hzt, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyHostToDevice));
+                gpuErrchk(cudaMemcpy(dEx_t2, _kpar_list_host[device_id]->Ex, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToDevice));
+                gpuErrchk(cudaMemcpy(dEy_t2, _kpar_list_host[device_id]->Ey, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToDevice));
+                gpuErrchk(cudaMemcpy(dEz_t2, _kpar_list_host[device_id]->Ez, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToDevice));
+                gpuErrchk(cudaMemcpy(dHx_t2, _kpar_list_host[device_id]->Hx, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToDevice));
+                gpuErrchk(cudaMemcpy(dHy_t2, _kpar_list_host[device_id]->Hy, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToDevice));
+                gpuErrchk(cudaMemcpy(dHz_t2, _kpar_list_host[device_id]->Hz, (It+2)*(Jt+2)*(Kt+2)*sizeof(double), cudaMemcpyDeviceToDevice));
+
 
                 // Calculate complex fields
+                if(device_id==0){
+                    auto timenow = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+                    std::cout << "Calc fields:" << ctime(&timenow);
+                }
                 t0 = step*_dt;
                 t1 = (step+Tn)*_dt;
                 t2 = (step+Tn+Tn)*_dt;
-                double t0H, t1H, t2H, phi, A, f0, f1, f2;
+                double t0H, t1H, t2H;//, phi, A, f0, f1, f2;
                 t0H = t0 - _dt/2; t1H = t1 - _dt/2; t2H = t2 - _dt/2;
+
+                complex128 *Ex_out, *Ey_out, *Ez_out, *Hx_out, *Hy_out, *Hz_out,
+                            *dEx_out, *dEy_out, *dEz_out, *dHx_out, *dHy_out, *dHz_out;
+                Ex_out = (complex128 *)malloc((It+2)*(Jt+2)*(Kt+2)*sizeof(complex128));
+                Ey_out = (complex128 *)malloc((It+2)*(Jt+2)*(Kt+2)*sizeof(complex128));
+                Ez_out = (complex128 *)malloc((It+2)*(Jt+2)*(Kt+2)*sizeof(complex128));
+                Hx_out = (complex128 *)malloc((It+2)*(Jt+2)*(Kt+2)*sizeof(complex128));
+                Hy_out = (complex128 *)malloc((It+2)*(Jt+2)*(Kt+2)*sizeof(complex128));
+                Hz_out = (complex128 *)malloc((It+2)*(Jt+2)*(Kt+2)*sizeof(complex128));
+                gpuErrchk(cudaMalloc((void **)&dEx_out, (It+2)*(Jt+2)*(Kt+2)*sizeof(complex128)));
+                gpuErrchk(cudaMalloc((void **)&dEy_out, (It+2)*(Jt+2)*(Kt+2)*sizeof(complex128)));
+                gpuErrchk(cudaMalloc((void **)&dEz_out, (It+2)*(Jt+2)*(Kt+2)*sizeof(complex128)));
+                gpuErrchk(cudaMalloc((void **)&dHx_out, (It+2)*(Jt+2)*(Kt+2)*sizeof(complex128)));
+                gpuErrchk(cudaMalloc((void **)&dHy_out, (It+2)*(Jt+2)*(Kt+2)*sizeof(complex128)));
+                gpuErrchk(cudaMalloc((void **)&dHz_out, (It+2)*(Jt+2)*(Kt+2)*sizeof(complex128)));
+
+                size_t numBlock = ceil((It+2)*(Jt+2)*(Kt+2)/(double)blockdim);
+                kernel_calc_complex_fields <<< numBlock, blockdim >>> (t0, t1, t2, dEx_t0, dEx_t1, dEx_t2, (It+2)*(Jt+2)*(Kt+2), dEx_out);
+                kernel_calc_complex_fields <<< numBlock, blockdim >>> (t0, t1, t2, dEy_t0, dEy_t1, dEy_t2, (It+2)*(Jt+2)*(Kt+2), dEy_out);
+                kernel_calc_complex_fields <<< numBlock, blockdim >>> (t0, t1, t2, dEz_t0, dEz_t1, dEz_t2, (It+2)*(Jt+2)*(Kt+2), dEz_out);
+                kernel_calc_complex_fields <<< numBlock, blockdim >>> (t0H, t1H, t2H, dHx_t0, dHx_t1, dHx_t2, (It+2)*(Jt+2)*(Kt+2), dHx_out);
+                kernel_calc_complex_fields <<< numBlock, blockdim >>> (t0H, t1H, t2H, dHy_t0, dHy_t1, dHy_t2, (It+2)*(Jt+2)*(Kt+2), dHy_out);
+                kernel_calc_complex_fields <<< numBlock, blockdim >>> (t0H, t1H, t2H, dHz_t0, dHz_t1, dHz_t2, (It+2)*(Jt+2)*(Kt+2), dHz_out);
+                gpuErrchk(cudaMemcpy(Ex_out, dEx_out, (It+2)*(Jt+2)*(Kt+2)*sizeof(complex128), cudaMemcpyDeviceToHost));
+                gpuErrchk(cudaMemcpy(Ey_out, dEy_out, (It+2)*(Jt+2)*(Kt+2)*sizeof(complex128), cudaMemcpyDeviceToHost));
+                gpuErrchk(cudaMemcpy(Ez_out, dEz_out, (It+2)*(Jt+2)*(Kt+2)*sizeof(complex128), cudaMemcpyDeviceToHost));
+                gpuErrchk(cudaMemcpy(Hx_out, dHx_out, (It+2)*(Jt+2)*(Kt+2)*sizeof(complex128), cudaMemcpyDeviceToHost));
+                gpuErrchk(cudaMemcpy(Hy_out, dHy_out, (It+2)*(Jt+2)*(Kt+2)*sizeof(complex128), cudaMemcpyDeviceToHost));
+                gpuErrchk(cudaMemcpy(Hz_out, dHz_out, (It+2)*(Jt+2)*(Kt+2)*sizeof(complex128), cudaMemcpyDeviceToHost));
+
+                for(int ii=0; ii<It; ii++){
+                    for(int jj=0; jj<Jt; jj++){
+                        for(int kk=0; kk<Kt; kk++){
+                            _Ex_t0[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)] = Ex_out[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+(kk+1)];
+                            _Ey_t0[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)] = Ey_out[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+(kk+1)];
+                            _Ez_t0[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)] = Ez_out[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+(kk+1)];
+                            _Hx_t0[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)] = Hx_out[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+(kk+1)];
+                            _Hy_t0[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)] = Hy_out[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+(kk+1)];
+                            _Hz_t0[(ii+i0t)*J*K+(jj+j0t)*K+(kk+k0t)] = Hz_out[(ii+1)*(Jt+2)*(Kt+2)+(jj+1)*(Kt+2)+(kk+1)];
+                        }
+                    }
+                } // Calculate complex fields ends
+
+                delete[] Ex_out; delete[] Ey_out; delete[] Ez_out; delete[] Hx_out; delete[] Hy_out; delete[] Hz_out;
+                gpuErrchk(cudaFree(dEx_out)); gpuErrchk(cudaFree(dEy_out)); gpuErrchk(cudaFree(dEz_out));
+                gpuErrchk(cudaFree(dHx_out)); gpuErrchk(cudaFree(dHy_out)); gpuErrchk(cudaFree(dHz_out));
+                gpuErrchk(cudaFree(dEx_t0)); gpuErrchk(cudaFree(dEy_t0)); gpuErrchk(cudaFree(dEz_t0));
+                gpuErrchk(cudaFree(dHx_t0)); gpuErrchk(cudaFree(dHy_t0)); gpuErrchk(cudaFree(dHz_t0));
+                gpuErrchk(cudaFree(dEx_t1)); gpuErrchk(cudaFree(dEy_t1)); gpuErrchk(cudaFree(dEz_t1));
+                gpuErrchk(cudaFree(dHx_t1)); gpuErrchk(cudaFree(dHy_t1)); gpuErrchk(cudaFree(dHz_t1));
+                gpuErrchk(cudaFree(dEx_t2)); gpuErrchk(cudaFree(dEy_t2)); gpuErrchk(cudaFree(dEz_t2));
+                gpuErrchk(cudaFree(dHx_t2)); gpuErrchk(cudaFree(dHy_t2)); gpuErrchk(cudaFree(dHz_t2));
+/*
                 for(int ii=0; ii<It; ii++){
                     for(int jj=0; jj<Jt; jj++){
                         for(int kk=0; kk<Kt; kk++){
@@ -3280,7 +3396,7 @@ void fdtd::FDTD::solve()
                         }
                     }
                 } // Calculate complex fields ends
-
+*/
                 // Free up memory
                 delete[] Ext; delete[] Eyt; delete[] Ezt; delete[] Hxt; delete[] Hyt; delete[] Hzt;
                 delete[] Emid_list[device_id];
@@ -3292,6 +3408,9 @@ void fdtd::FDTD::solve()
     }
     for(auto &thread: threads_kernels)
         thread.join();
+
+    timenow = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    std::cout << "Finish FDTD:" << ctime(&timenow);
 
     // Free up memory
     delete[] Ex0; delete[] Ex1; delete[] Ex2; delete[] Ey0; delete[] Ey1; delete[] Ey2; delete[] Ez0; delete[] Ez1; delete[] Ez2;

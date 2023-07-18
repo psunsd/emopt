@@ -668,6 +668,7 @@ class AdjointMethod(with_metaclass(ABCMeta, object)):
             respect to the design variables
         """
         # update system
+        print('Update system:'+datetime.now().isoformat())
         self.update_system(params)
         self.sim.update()
 
@@ -682,6 +683,7 @@ class AdjointMethod(with_metaclass(ABCMeta, object)):
         comm = MPI.COMM_WORLD
 
         # This should return only non-null on RANK=0
+        print('Calc dFdx:'+datetime.now().isoformat())
         dFdx = self.calc_dFdx(self.sim, params)
 
         # Reduce memory footprint of sim._E_fwd_t0 after dFdx calculation
@@ -710,6 +712,7 @@ class AdjointMethod(with_metaclass(ABCMeta, object)):
         #    pass
 
         # run the adjoint source
+        print('Set adj src:'+datetime.now().isoformat())
         self.sim.set_adjoint_sources(dFdx)
         self.sim.solve_adjoint()
 

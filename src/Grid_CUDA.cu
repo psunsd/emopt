@@ -79,7 +79,15 @@ __device__ void device_overlap_raster_multicell(double *vertx, double *verty, in
     int Ninter=0; // number of intercepts
     int ub, lb;
     bool *vertin = new bool[vertlen];
+    if(vertin==NULL){ 
+        printf("bad_alloc vertin in device_overlap_raster_multicell\n"); 
+        return; 
+    }
     double *xinter = new double[vertlen];
+    if(xinter==NULL){ 
+        printf("bad_alloc xinter in device_overlap_raster_multicell\n"); 
+        return; 
+    }
     bool swapped;
     double subcellsize = xminp1-xmin, xtmp, pty;
     double subcellsizey = yminp1 - ymin;

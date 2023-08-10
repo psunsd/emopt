@@ -962,7 +962,7 @@ void StructuredMaterial3D::get_values(ArrayXcd& grid, int k1, int k2,
     cudaError_t cudaerr;
     gpuErrchk(cudaMemcpy(_kpar_device, _kpar_host, sizeof(kernelpar), cudaMemcpyHostToDevice));
 
-    cudaDeviceSetLimit(cudaLimitMallocHeapSize, 64*1024*1024);
+    cudaDeviceSetLimit(cudaLimitMallocHeapSize, 256*1024*1024);
 
     // laminated launch
     dim3 block_dim(8, 4);

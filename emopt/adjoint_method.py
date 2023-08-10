@@ -552,7 +552,7 @@ class AdjointMethod(with_metaclass(ABCMeta, object)):
             Z_grad = torch.autograd.grad(loss_grad, paramdiff, allow_unused=True)[0]
             gradient += -2*np.real(Z_grad.detach().numpy())
 
-            # Ey
+            # Ez
             print("Calc Ez gradient:"+datetime.now().isoformat())
             sx, sy, sz = 0.0*self.sim._dx, 0.0*self.sim._dy, 0.0*self.sim._dz
             z = torch.linspace(sz+l_inds[0]*self.sim.dz, sz+(l_inds[0]+sizes[0])*self.sim.dz, sizes[0])
@@ -1088,9 +1088,9 @@ class AdjointMethodMORE(with_metaclass(ABCMeta, AdjointMethod)):
             del am.sim._Ex_adj_t0; del am.sim._Ey_adj_t0; del am.sim._Ez_adj_t0
             del am.sim._Hx_adj_t0; del am.sim._Hy_adj_t0; del am.sim._Hz_adj_t0
 
-        for am in self._ams:
-            del am.sim._Ex; del am.sim._Ey; del am.sim._Ez;
-            del am.sim._Hx; del am.sim._Hy; del am.sim._Hz;
+        # for am in self._ams:
+        #     del am.sim._Ex; del am.sim._Ey; del am.sim._Ez;
+        #     del am.sim._Hx; del am.sim._Hy; del am.sim._Hz;
         gc.collect()
 
         pos,lens = self._ams[0].sim._da.getCorners()
@@ -1169,7 +1169,7 @@ class AdjointMethodMORE(with_metaclass(ABCMeta, AdjointMethod)):
             am.sim._Ez_fwd_t0_pbox.destroy()
             am.sim._Ex_adj_t0_pbox.destroy()
             am.sim._Ey_adj_t0_pbox.destroy()
-            am.sim._Ez_adj_t0.pbox.destroy()
+            am.sim._Ez_adj_t0_pbox.destroy()
 
         if(NOT_PARALLEL):
             grad_total = self.calc_total_gradient(foms, gradient)

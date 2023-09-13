@@ -160,18 +160,19 @@ void prepare_nvlink (int device_id, int gpus_count)
 	}
 }
 
-void cudaP2PAssert(int* _P2Pworking)
+void cudaP2PAssert_pair(int* P2Pworking_pair, int src_device_id, int dst_device_id)
 {
     int Ngpus = 2;
     double *host_data = new double[Ngpus]{2.6, 7.1};
     double *host_buffer = new double[Ngpus]{-1.0, -1.0};
+    int *device_id_list = new int[Ngpus]{src_device_id, dst_device_id};
     std::vector<std::thread> threads_list;
     threads_list.reserve(Ngpus);
     double** d_sender_list = new double*[Ngpus];
     double** d_receiver_list = new double*[Ngpus];
     double *d_sender, *d_receiver;
     for(int device_id=0; device_id<Ngpus; device_id++){
-        gpuErrchk(cudaSetDevice(device_id));
+        gpuErrchk(cudaSetDevice(device_id_list[device_id]));
         gpuErrchk(cudaMalloc((void **)&d_sender, sizeof(double)));
         gpuErrchk(cudaMalloc((void **)&d_receiver, sizeof(double)));
         gpuErrchk(cudaMemcpy(d_sender, host_data+device_id, sizeof(double), cudaMemcpyHostToDevice));
@@ -180,13 +181,13 @@ void cudaP2PAssert(int* _P2Pworking)
     }    
     for(int device_id=0; device_id<Ngpus; device_id++){
         threads_list.emplace_back([=](){
-            gpuErrchk(cudaSetDevice(device_id));
+            gpuErrchk(cudaSetDevice(device_id_list[device_id]));
             if(device_id==0) {
-                gpuErrchk(cudaMemcpyPeer(d_receiver_list[device_id], device_id, d_sender_list[device_id+1], device_id+1, sizeof(double)));
+                gpuErrchk(cudaMemcpyPeer(d_receiver_list[device_id], device_id_list[device_id], d_sender_list[device_id+1], device_id_list[device_id+1], sizeof(double)));
                 gpuErrchk(cudaMemcpy(host_buffer+device_id, d_receiver_list[device_id], sizeof(double), cudaMemcpyDeviceToHost));
             }
             else {
-                gpuErrchk(cudaMemcpyPeer(d_receiver_list[device_id], device_id, d_sender_list[device_id-1], device_id-1, sizeof(double)));
+                gpuErrchk(cudaMemcpyPeer(d_receiver_list[device_id], device_id_list[device_id], d_sender_list[device_id-1], device_id_list[device_id-1], sizeof(double)));
                 gpuErrchk(cudaMemcpy(host_buffer+device_id, d_receiver_list[device_id], sizeof(double), cudaMemcpyDeviceToHost));
             }
         });
@@ -195,13 +196,30 @@ void cudaP2PAssert(int* _P2Pworking)
         thread.join();
 
     if(host_buffer[0]==host_data[1] && host_buffer[1]==host_data[0])
-        *_P2Pworking = 1;
+        *P2Pworking_pair = 1;
     else
-        *_P2Pworking = 0; 
+        *P2Pworking_pair = 0;
 
     for(int device_id=0; device_id<Ngpus; device_id++){
         gpuErrchk(cudaFree(d_sender_list[device_id]));
         gpuErrchk(cudaFree(d_receiver_list[device_id]));
+    }
+}
+
+void cudaP2PAssert(int* _P2Pworking, int Ngpus)
+{
+    int P2Pworking_pair{0};
+    *_P2Pworking = 1;
+    for(int src=0; src<Ngpus; src++){
+        for(int dst=0; dst<Ngpus; dst++){
+            if(src!=dst){
+                cudaP2PAssert_pair(&P2Pworking_pair, src, dst);
+                if(!P2Pworking_pair){
+                    std::cout << "P2P not working between devices " << src << " and " << dst << std::endl;
+                    *_P2Pworking = 0;
+                }
+            }
+        }
     }
 }
 
@@ -2671,9 +2689,11 @@ void fdtd::FDTD::set_GPUDirect()
             P2P_AllEnabled = P2P_AllEnabled && perfRank;
         }
     }
+    if(!P2P_AllEnabled){
+        std::cout << "P2P not enabled. Preparing GPU Direct..." << std::endl;
+    }
 
-    // Prepare GPU Direct only when not all GPU pairs have P2P enabled
-    // if(!P2P_AllEnabled){
+    // Prepare GPU Direct
     std::vector<std::thread> threads_nvlink;
     threads_nvlink.reserve(_gpus_count);
     for(int device_id=0; device_id<_gpus_count; device_id++)
@@ -2685,11 +2705,14 @@ void fdtd::FDTD::set_GPUDirect()
     }
     for(auto &thread: threads_nvlink)
         thread.join();
-    // }
+
     // Validate whether GPU Direct works 
-    if(_gpus_count>1) cudaP2PAssert(&_P2Pworking);
-    if(!_P2Pworking)
-        std::cout << "P2P not working. Fallback to host-to-device copy." << std::endl;
+    if(_gpus_count>1) {
+        cudaP2PAssert(&_P2Pworking, _gpus_count);
+        if(!_P2Pworking){
+            std::cout << "P2P not working. Fallback to host-to-device copy." << std::endl;
+        }
+    }
 }
 
 void fdtd::FDTD::solve()

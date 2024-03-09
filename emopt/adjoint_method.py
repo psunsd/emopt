@@ -1,4 +1,32 @@
-"""
+/******************************************************************************
+ * Copyright (c) 2023, Andrew Michaels.  All rights reserved.
+ * Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *     * Redistributions of source code must retain the above copyright
+ *       notice, this list of conditions and the following disclaimer.
+ *     * Redistributions in binary form must reproduce the above copyright
+ *       notice, this list of conditions and the following disclaimer in the
+ *       documentation and/or other materials provided with the distribution.
+ *     * Neither the name of the NVIDIA CORPORATION nor the
+ *       names of its contributors may be used to endorse or promote products
+ *       derived from this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL NVIDIA CORPORATION BE LIABLE FOR ANY
+ * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ ******************************************************************************/
+
+ """
 This modules provides the definition for the :class:`.AdjointMethod` class.  Given an
 electromagnetic structure (which is simulated using the FDFD class) and a merit
 function which describes the 'performance' of that electromagnetic structure,
@@ -509,7 +537,7 @@ class AdjointMethod(with_metaclass(ABCMeta, object)):
         gc.collect()
 
         if self._UseAutoDiff is True:
-            ksigz = self.ksigz
+            # ksigz = self.ksigz
             paramdiff = torch.zeros(len(params))
             for ii in range(len(params)):
                 paramdiff[ii] = params[ii]
@@ -528,8 +556,11 @@ class AdjointMethod(with_metaclass(ABCMeta, object)):
             z = torch.linspace(sz+l_inds[0]*self.sim.dz, sz+(l_inds[0]+sizes[0])*self.sim.dz, sizes[0])
             shape = self.update_system_diffgeo(paramdiff, sx=sx, sy=sy)
             Z = shape.unsqueeze(-1).expand(-1,-1,z.shape[0])
-            Z = Z * torch.sigmoid(ksigz*(z-zmin))*torch.sigmoid(-ksigz*(z-zmax)).unsqueeze(0).unsqueeze(0).expand(shape.shape[0], shape.shape[1], -1)
-            Z += torch.sigmoid(-ksigz*(z-zmin)).unsqueeze(0).unsqueeze(0).expand(shape.shape[0], shape.shape[1], -1)
+            # Z = Z * torch.sigmoid(ksigz*(z-zmin))*torch.sigmoid(-ksigz*(z-zmax)).unsqueeze(0).unsqueeze(0).expand(shape.shape[0], shape.shape[1], -1)
+            # Z += torch.sigmoid(-ksigz*(z-zmin)).unsqueeze(0).unsqueeze(0).expand(shape.shape[0], shape.shape[1], -1)
+            Z = Z * torch.clamp((z-zmin)/sim._dz+0.5, min=0.0, max=1.0)*torch.clamp(-(z-zmax)/sim._dz+0.5, min=0.0, max=1.0).unsqueeze(0).unsqueeze(0).expand(shape.shape[0], shape.shape[1], -1)
+            Z += torch.clamp(-(z-zmin)/sim._dz+0.5, min=0.0, max=1.0).unsqueeze(0).unsqueeze(0).expand(shape.shape[0], shape.shape[1], -1)
+
             Z = self.sim.perturb_epsclad + (self.sim.perturb_epscore-self.sim.perturb_epsclad) * Z
             Zcomp = torch.complex(Z, torch.zeros_like(Z)).permute(2,1,0)
             fields_tensor = torch.tensor(1j*self.sim._Ex_fwd_t0_pbox[...]*self.sim._Ex_adj_t0_pbox[...])
@@ -543,8 +574,11 @@ class AdjointMethod(with_metaclass(ABCMeta, object)):
             z = torch.linspace(sz+l_inds[0]*self.sim.dz, sz+(l_inds[0]+sizes[0])*self.sim.dz, sizes[0])
             shape = self.update_system_diffgeo(paramdiff, sx=sx, sy=sy)
             Z = shape.unsqueeze(-1).expand(-1,-1,z.shape[0])
-            Z = Z * torch.sigmoid(ksigz*(z-zmin))*torch.sigmoid(-ksigz*(z-zmax)).unsqueeze(0).unsqueeze(0).expand(shape.shape[0], shape.shape[1], -1)
-            Z += torch.sigmoid(-ksigz*(z-zmin)).unsqueeze(0).unsqueeze(0).expand(shape.shape[0], shape.shape[1], -1)
+            # Z = Z * torch.sigmoid(ksigz*(z-zmin))*torch.sigmoid(-ksigz*(z-zmax)).unsqueeze(0).unsqueeze(0).expand(shape.shape[0], shape.shape[1], -1)
+            # Z += torch.sigmoid(-ksigz*(z-zmin)).unsqueeze(0).unsqueeze(0).expand(shape.shape[0], shape.shape[1], -1)
+            Z = Z * torch.clamp((z-zmin)/sim._dz+0.5, min=0.0, max=1.0)*torch.clamp(-(z-zmax)/sim._dz+0.5, min=0.0, max=1.0).unsqueeze(0).unsqueeze(0).expand(shape.shape[0], shape.shape[1], -1)
+            Z += torch.clamp(-(z-zmin)/sim._dz+0.5, min=0.0, max=1.0).unsqueeze(0).unsqueeze(0).expand(shape.shape[0], shape.shape[1], -1)
+
             Z = self.sim.perturb_epsclad + (self.sim.perturb_epscore-self.sim.perturb_epsclad) * Z
             Zcomp = torch.complex(Z, torch.zeros_like(Z)).permute(2,1,0)
             fields_tensor = torch.tensor(1j*self.sim._Ey_fwd_t0_pbox[...]*self.sim._Ey_adj_t0_pbox[...])
@@ -558,8 +592,11 @@ class AdjointMethod(with_metaclass(ABCMeta, object)):
             z = torch.linspace(sz+l_inds[0]*self.sim.dz, sz+(l_inds[0]+sizes[0])*self.sim.dz, sizes[0])
             shape = self.update_system_diffgeo(paramdiff, sx=sx, sy=sy)
             Z = shape.unsqueeze(-1).expand(-1,-1,z.shape[0])
-            Z = Z * torch.sigmoid(ksigz*(z-zmin))*torch.sigmoid(-ksigz*(z-zmax)).unsqueeze(0).unsqueeze(0).expand(shape.shape[0], shape.shape[1], -1)
-            Z += torch.sigmoid(-ksigz*(z-zmin)).unsqueeze(0).unsqueeze(0).expand(shape.shape[0], shape.shape[1], -1)
+            # Z = Z * torch.sigmoid(ksigz*(z-zmin))*torch.sigmoid(-ksigz*(z-zmax)).unsqueeze(0).unsqueeze(0).expand(shape.shape[0], shape.shape[1], -1)
+            # Z += torch.sigmoid(-ksigz*(z-zmin)).unsqueeze(0).unsqueeze(0).expand(shape.shape[0], shape.shape[1], -1)
+            Z = Z * torch.clamp((z-zmin)/sim._dz+0.5, min=0.0, max=1.0)*torch.clamp(-(z-zmax)/sim._dz+0.5, min=0.0, max=1.0).unsqueeze(0).unsqueeze(0).expand(shape.shape[0], shape.shape[1], -1)
+            Z += torch.clamp(-(z-zmin)/sim._dz+0.5, min=0.0, max=1.0).unsqueeze(0).unsqueeze(0).expand(shape.shape[0], shape.shape[1], -1)
+
             Z = self.sim.perturb_epsclad + (self.sim.perturb_epscore-self.sim.perturb_epsclad) * Z
             Zcomp = torch.complex(Z, torch.zeros_like(Z)).permute(2,1,0)
             fields_tensor = torch.tensor(1j*self.sim._Ez_fwd_t0_pbox[...]*self.sim._Ez_adj_t0_pbox[...])

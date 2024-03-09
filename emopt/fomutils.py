@@ -1,3 +1,31 @@
+/******************************************************************************
+ * Copyright (c) 2023, Andrew Michaels.  All rights reserved.
+ * Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *     * Redistributions of source code must retain the above copyright
+ *       notice, this list of conditions and the following disclaimer.
+ *     * Redistributions in binary form must reproduce the above copyright
+ *       notice, this list of conditions and the following disclaimer in the
+ *       documentation and/or other materials provided with the distribution.
+ *     * Neither the name of the NVIDIA CORPORATION nor the
+ *       names of its contributors may be used to endorse or promote products
+ *       derived from this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL NVIDIA CORPORATION BE LIABLE FOR ANY
+ * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ ******************************************************************************/
+
 """
 Common functions useful for calculating figures of merit and their derivatives.
 """
@@ -1107,6 +1135,20 @@ class ModeMatch(object):
         """
         return self.mode_match_fwd.real / P_in
 
+    def get_mode_match_forward_phase(self):
+        """Get the mode match phase in the forward direction.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        float
+            The mode match phase for forward-propagating fields.
+        """
+        return np.angle(self.am)
+
     def get_mode_match_back(self, P_in):
         """Get the mode match in the backwards direction normalized with respect to
         a desired power.
@@ -1123,6 +1165,44 @@ class ModeMatch(object):
         """
         return self.mode_match_back.real / P_in
 
+    def get_mode_match_back_phase(self):
+        """Get the mode match phase in the backward direction.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        float
+            The mode match phase for backward-propagating fields.
+        """
+        ### Source mode and sink mode may differ by a sign of -1 or angle difference of pi
+        ### Need to check whether the source mode has the same sign as sink mode
+        if self.am1.real<0:
+            return np.angle(self.bm)
+        else:
+            return np.angle(-self.bm)
+
+    def get_dFdEx_phase(self):
+        ds = self.ds1*self.ds2
+        return 0.5*ds*(-np.conj(self.Hzm)*self.y_dot_s + np.conj(self.Hym)*self.z_dot_s) / self.Pm / 2.0 / 1.0j / self.am
+    def get_dFdEy_phase(self):
+        ds = self.ds1*self.ds2
+        return 0.5*ds*(np.conj(self.Hzm)*self.x_dot_s - np.conj(self.Hxm)*self.z_dot_s) / self.Pm / 2.0 / 1.0j / self.am
+    def get_dFdEz_phase(self):
+        ds = self.ds1*self.ds2
+        return 0.5*ds*(-np.conj(self.Hym)*self.x_dot_s + np.conj(self.Hxm)*self.y_dot_s) / self.Pm / 2.0 / 1.0j / self.am
+    def get_dFdHx_phase(self):
+        ds = self.ds1*self.ds2
+        return 0.5*ds*(np.conj(self.Ezm)*self.y_dot_s - np.conj(self.Eym)*self.z_dot_s) / np.conj(self.Pm) / 2.0 / 1.0j / self.am
+    def get_dFdHy_phase(self):
+        ds = self.ds1*self.ds2
+        return 0.5*ds*(-np.conj(self.Ezm)*self.x_dot_s + np.conj(self.Exm)*self.z_dot_s) / np.conj(self.Pm) / 2.0 / 1.0j / self.am
+    def get_dFdHz_phase(self):
+        ds = self.ds1*self.ds2
+        return 0.5*ds*(np.conj(self.Eym)*self.x_dot_s - np.conj(self.Exm)*self.y_dot_s) / np.conj(self.Pm) / 2.0 / 1.0j / self.am
+
     def get_dFdEx(self):
         """Get the derivative of unnormalized mode match with respect to Ex.
 
@@ -1134,7 +1214,6 @@ class ModeMatch(object):
         """
         ds = self.ds1*self.ds2
         return 1/4.0 * ds * np.real(self.Pm) * (-np.conj(self.Hzm)*self.y_dot_s + np.conj(self.Hym)*self.z_dot_s) * np.conj(self.am)/self.Pm
-
     def get_dFdEy(self):
         """Get the derivative of unnormalized mode match with respect to Ey.
 
@@ -1146,7 +1225,6 @@ class ModeMatch(object):
         """
         ds = self.ds1*self.ds2
         return 1/4.0 * ds * np.real(self.Pm) * (np.conj(self.Hzm)*self.x_dot_s - np.conj(self.Hxm)*self.z_dot_s) * np.conj(self.am)/self.Pm
-
     def get_dFdEz(self):
         """Get the derivative of unnormalized mode match with respect to Ez.
 
@@ -1158,7 +1236,6 @@ class ModeMatch(object):
         """
         ds = self.ds1*self.ds2
         return 1/4.0 * ds * np.real(self.Pm) * (-np.conj(self.Hym)*self.x_dot_s + np.conj(self.Hxm)*self.y_dot_s) * np.conj(self.am)/self.Pm
-
     def get_dFdHx(self):
         """Get the derivative of unnormalized mode match with respect to Hx.
 
@@ -1170,7 +1247,6 @@ class ModeMatch(object):
         """
         ds = self.ds1*self.ds2
         return 1/4.0 * ds * np.real(self.Pm) * (np.conj(self.Ezm)*self.y_dot_s - np.conj(self.Eym)*self.z_dot_s) * np.conj(self.am)/np.conj(self.Pm)
-
     def get_dFdHy(self):
         """Get the derivative of unnormalized mode match with respect to Hy.
 
@@ -1182,7 +1258,6 @@ class ModeMatch(object):
         """
         ds = self.ds1*self.ds2
         return 1/4.0 * ds * np.real(self.Pm) * (-np.conj(self.Ezm)*self.x_dot_s + np.conj(self.Exm)*self.z_dot_s) * np.conj(self.am)/np.conj(self.Pm)
-
     def get_dFdHz(self):
         """Get the derivative of unnormalized mode match with respect to Hz.
 
@@ -1194,6 +1269,44 @@ class ModeMatch(object):
         """
         ds = self.ds1*self.ds2
         return 1/4.0 * ds * np.real(self.Pm) * (np.conj(self.Eym)*self.x_dot_s - np.conj(self.Exm)*self.y_dot_s) * np.conj(self.am)/np.conj(self.Pm)
+
+    def get_dFdEx_back(self):
+        ds = self.ds1*self.ds2
+        return 1/4.0 * ds * np.real(self.Pm) * (-np.conj(self.Hzm)*self.y_dot_s + np.conj(self.Hym)*self.z_dot_s) * np.conj(self.bm)/self.Pm
+    def get_dFdEy_back(self):
+        ds = self.ds1*self.ds2
+        return 1/4.0 * ds * np.real(self.Pm) * (np.conj(self.Hzm)*self.x_dot_s - np.conj(self.Hxm)*self.z_dot_s) * np.conj(self.bm)/self.Pm
+    def get_dFdEz_back(self):
+        ds = self.ds1*self.ds2
+        return 1/4.0 * ds * np.real(self.Pm) * (-np.conj(self.Hym)*self.x_dot_s + np.conj(self.Hxm)*self.y_dot_s) * np.conj(self.bm)/self.Pm
+    def get_dFdHx_back(self):
+        ds = self.ds1*self.ds2
+        return -1/4.0 * ds * np.real(self.Pm) * (np.conj(self.Ezm)*self.y_dot_s - np.conj(self.Eym)*self.z_dot_s) * np.conj(self.bm)/np.conj(self.Pm)
+    def get_dFdHy_back(self):
+        ds = self.ds1*self.ds2
+        return -1/4.0 * ds * np.real(self.Pm) * (-np.conj(self.Ezm)*self.x_dot_s + np.conj(self.Exm)*self.z_dot_s) * np.conj(self.bm)/np.conj(self.Pm)
+    def get_dFdHz_back(self):
+        ds = self.ds1*self.ds2
+        return -1/4.0 * ds * np.real(self.Pm) * (np.conj(self.Eym)*self.x_dot_s - np.conj(self.Exm)*self.y_dot_s) * np.conj(self.bm)/np.conj(self.Pm)
+
+    def get_dFdEx_back_phase(self):
+        ds = self.ds1*self.ds2
+        return 0.5*ds*(-np.conj(self.Hzm)*self.y_dot_s + np.conj(self.Hym)*self.z_dot_s) / self.Pm / 2.0 / 1.0j / self.bm
+    def get_dFdEy_back_phase(self):
+        ds = self.ds1*self.ds2
+        return 0.5*ds*(np.conj(self.Hzm)*self.x_dot_s - np.conj(self.Hxm)*self.z_dot_s) / self.Pm / 2.0 / 1.0j / self.bm
+    def get_dFdEz_back_phase(self):
+        ds = self.ds1*self.ds2
+        return 0.5*ds*(-np.conj(self.Hym)*self.x_dot_s + np.conj(self.Hxm)*self.y_dot_s) / self.Pm / 2.0 / 1.0j / self.bm
+    def get_dFdHx_back_phase(self):
+        ds = self.ds1*self.ds2
+        return -0.5*ds*(np.conj(self.Ezm)*self.y_dot_s - np.conj(self.Eym)*self.z_dot_s) / np.conj(self.Pm) / 2.0 / 1.0j / self.bm
+    def get_dFdHy_back_phase(self):
+        ds = self.ds1*self.ds2
+        return -0.5*ds*(-np.conj(self.Ezm)*self.x_dot_s + np.conj(self.Exm)*self.z_dot_s) / np.conj(self.Pm) / 2.0 / 1.0j / self.bm
+    def get_dFdHz_back_phase(self):
+        ds = self.ds1*self.ds2
+        return -0.5*ds*(np.conj(self.Eym)*self.x_dot_s - np.conj(self.Exm)*self.y_dot_s) / np.conj(self.Pm) / 2.0 / 1.0j / self.bm
 
 #####################################################################################
 # Functions of handling interpolated fields

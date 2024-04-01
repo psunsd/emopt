@@ -23,3 +23,8 @@ The following new parameters in the initialization of emopt.fdtd.FDTD class are 
 The following new parameters in the initialization of emopt.grid.StructuredMaterial3D are exposed to users:
 
     Nsubcell: integer; number of subcells per grid cell used for fas approximate calculation of polygon clipping between geometry primitive and grid cell; default to 256
+
+The FDTD and the grid meshing modules are profiled using the NVIDIA Nsight Compute tool: both modules are compute-bound, and have achieved ~85% of GPU's peak performance.
+
+![image](https://github.com/psunsd/emopt/assets/61566314/b9af4f52-8499-442c-98ce-84597ffd3e95)
+

@@ -1147,7 +1147,11 @@ class ModeMatch(object):
         float
             The mode match phase for forward-propagating fields.
         """
-        return np.angle(self.am)
+        fwd_phase = np.angle(self.am)
+        if fwd_phase < np.pi/2.0:
+            return fwd_phase + np.pi
+        else:
+            return fwd_phase
 
     def get_mode_match_back(self, P_in):
         """Get the mode match in the backwards direction normalized with respect to
@@ -1177,12 +1181,11 @@ class ModeMatch(object):
         float
             The mode match phase for backward-propagating fields.
         """
-        ### Source mode and sink mode may differ by a sign of -1 or angle difference of pi
-        ### Need to check whether the source mode has the same sign as sink mode
-        if self.am1.real<0:
-            return np.angle(self.bm)
+        back_phase = np.angle(self.bm)
+        if back_phase < np.pi/2.0:
+            return back_phase + np.pi
         else:
-            return np.angle(-self.bm)
+            return back_phase
 
     def get_dFdEx_phase(self):
         ds = self.ds1*self.ds2

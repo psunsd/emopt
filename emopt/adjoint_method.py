@@ -1,3 +1,4 @@
+"""
 /******************************************************************************
  * Copyright (c) 2023, Andrew Michaels.  All rights reserved.
  * Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
@@ -26,7 +27,6 @@
  *
  ******************************************************************************/
 
- """
 This modules provides the definition for the :class:`.AdjointMethod` class.  Given an
 electromagnetic structure (which is simulated using the FDFD class) and a merit
 function which describes the 'performance' of that electromagnetic structure,

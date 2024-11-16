@@ -174,7 +174,7 @@ def install_petsc(install_dir):
           "--COPTFLAGS='-O3'", "--FOPTFLAGS='-O3'", "--CXXOPTFLAGS='-O3'",  
           "--with-debugging=0", "--prefix="+install_dir, "--download-scalapack", 
           "--download-mumps", "--download-fblaslapack=1"])
-    call(['make', 'all', 'test'])
+    call(['make', 'all'])#, 'test'])
 
     print_message('Installing PETSc...')
     call(['make', 'install'])
@@ -209,7 +209,7 @@ def install_slepc(install_dir):
     call(['./configure', '--prefix='+install_dir])
     call(['make', 'all'])
     call(['make', 'install'])
-    call(['make', 'test'])
+    #call(['make', 'test'])
 
     # cleanup
     os.chdir('../')

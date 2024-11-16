@@ -170,17 +170,19 @@ def install_petsc(install_dir):
 
     # compile
     os.environ['PETSC_DIR'] = '/home/emopt/build/'+petsc_folder
-    print_message('Compiling PETSc...')
+    print_message('Configuring PETSc...')
     call(["./configure", "--with-scalar-type=complex", "--with-mpi=1",
           "--COPTFLAGS='-O3'", "--FOPTFLAGS='-O3'", "--CXXOPTFLAGS='-O3'",  
           "--with-debugging=0", "--prefix="+install_dir, "--download-scalapack", 
           "--download-mumps", "--download-fblaslapack=1"])
+    print_message('Compiling PETSc...')
     call(['make', 'PETSC_DIR=/home/emopt/build/'+petsc_folder, 'PETSC_ARCH=arch-linux-c-opt', 'all'])
 
     print_message('Installing PETSc...')
     call(['make', 'PETSC_DIR=/home/emopt/build/'+petsc_folder, 'PETSC_ARCH=arch-linux-c-opt', 'install'])
+    print_message('Checking PETSc installation...')
     call(['make', 'PETSC_DIR=/home/.emopt', 'PETSC_ARCH=""', 'check'])
-    os.environ['PETSC_DIR'] = install_dir
+#    os.environ['PETSC_DIR'] = install_dir
 
     # cleanup
     print_message('Cleaning up working directory...')
@@ -205,16 +207,18 @@ def install_slepc(install_dir):
     call(['tar', 'xvzf', slepc_fname])
 
     # compile and install
-    print_message('Compiling SLEPc...')
+    print_message('Configuring SLEPc...')
     slepc_folder = "slepc-" + SLEPC_VERSION
     os.chdir(slepc_folder)
     os.environ['SLEPC_DIR'] = '/home/emopt/build/'+slepc_folder
     os.environ['PETSC_ARCH'] = 'arch-linux-c-opt'
 
     call(['./configure', '--prefix='+install_dir])
-    
+    print_message('Compiling SLEPc...')
     call(['make', 'SLEPC_DIR=/home/emopt/build/'+slepc_folder, 'PETSC_DIR=/home/emopt/build/petsc-'+PETSC_VERSION, 'PETSC_ARCH=arch-linux-c-opt', 'all'])
+    print_message('Installing SLEPc...')
     call(['make', 'SLEPC_DIR=/home/emopt/build/'+slepc_folder, 'PETSC_DIR=/home/emopt/build/petsc-'+PETSC_VERSION, 'install'])
+    print_message('Checking SLEPc installation...')
     call(['make', 'SLEPC_DIR=/home/emopt/build/'+slepc_folder, 'PETSC_DIR=/home/emopt/build/petsc-'+PETSC_VERSION, 'PETSC_ARCH=arch-linux-c-opt', 'check'])
     #call(['make', 'test'])
 

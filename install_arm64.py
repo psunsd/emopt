@@ -169,21 +169,23 @@ def install_petsc(install_dir):
     os.chdir(petsc_folder)
 
     # compile
+    os.environ['PETSC_DIR'] = '/home/emopt/build/'+petsc_folder
     print_message('Compiling PETSc...')
     call(["./configure", "--with-scalar-type=complex", "--with-mpi=1",
           "--COPTFLAGS='-O3'", "--FOPTFLAGS='-O3'", "--CXXOPTFLAGS='-O3'",  
           "--with-debugging=0", "--prefix="+install_dir, "--download-scalapack", 
           "--download-mumps", "--download-fblaslapack=1"])
-    call(['make', 'all'])#, 'test'])
+    call(['make', 'PETSC_DIR=/home/emopt/build/'+petsc_folder, 'PETSC_ARCH=arch-linux-c-opt', 'all'])
 
     print_message('Installing PETSc...')
-    call(['make', 'install'])
+    call(['make', 'PETSC_DIR=/home/emopt/build/'+petsc_folder, 'PETSC_ARCH=arch-linux-c-opt', 'install'])
+    call(['make', 'PETSC_DIR=/home/.emopt', 'PETSC_ARCH=""', 'check'])
     os.environ['PETSC_DIR'] = install_dir
 
     # cleanup
     print_message('Cleaning up working directory...')
     os.chdir('../')
-    shutil.rmtree(petsc_folder)
+#    shutil.rmtree(petsc_folder)
 
 def install_slepc(install_dir):
     """Compile and install SLEPc."""
@@ -206,15 +208,20 @@ def install_slepc(install_dir):
     print_message('Compiling SLEPc...')
     slepc_folder = "slepc-" + SLEPC_VERSION
     os.chdir(slepc_folder)
+    os.environ['SLEPC_DIR'] = '/home/emopt/build/'+slepc_folder
+    os.environ['PETSC_ARCH'] = 'arch-linux-c-opt'
+
     call(['./configure', '--prefix='+install_dir])
-    call(['make', 'all'])
-    call(['make', 'install'])
+    
+    call(['make', 'SLEPC_DIR=/home/emopt/build/'+slepc_folder, 'PETSC_DIR=/home/emopt/build/petsc-'+PETSC_VERSION, 'PETSC_ARCH=arch-linux-c-opt', 'all'])
+    call(['make', 'SLEPC_DIR=/home/emopt/build/'+slepc_folder, 'PETSC_DIR=/home/emopt/build/petsc-'+PETSC_VERSION, 'install'])
+    call(['make', 'SLEPC_DIR=/home/emopt/build/'+slepc_folder, 'PETSC_DIR=/home/emopt/build/petsc-'+PETSC_VERSION, 'PETSC_ARCH=arch-linux-c-opt', 'check'])
     #call(['make', 'test'])
 
     # cleanup
     os.chdir('../')
-    shutil.rmtree(slepc_folder)
-    os.remove(slepc_fname)
+#    shutil.rmtree(slepc_folder)
+#    os.remove(slepc_fname)
 
 def install_deps():
     # setup logging

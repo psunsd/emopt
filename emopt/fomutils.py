@@ -1,3 +1,4 @@
+"""
 /******************************************************************************
  * Copyright (c) 2023, Andrew Michaels.  All rights reserved.
  * Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
@@ -26,7 +27,6 @@
  *
  ******************************************************************************/
 
-"""
 Common functions useful for calculating figures of merit and their derivatives.
 """
 from __future__ import absolute_import

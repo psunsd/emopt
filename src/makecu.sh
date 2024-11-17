@@ -29,4 +29,8 @@ g++ -c -fPIC Grid_CPP.cpp -fopenmp -O3 -march=native -DNDEBUG -std=c++14 -o Grid
 echo "Linking Grid..."
 g++ -shared -fopenmp -fPIC -o Grid.so Grid.o Grid_CUDA.o -lpthread -lrt -ldl -L/usr/local/cuda/lib64 -lcudart_static -lculibos
 echo "Copying objects..."
-mv *.so /home/.local/lib/python3.6/site-packages/emopt-2023.1.16-py3.6.egg/emopt/
+declare SITEPKGINFO=($(pip3 show emopt))
+EMOPTPATH=${SITEPKGINFO[28]}
+EMOPTPATH+="/emopt/"
+#mv *.so /home/.local/lib/python3.6/site-packages/emopt-2023.1.16-py3.6.egg/emopt/
+mv *.so $EMOPTPATH

@@ -8,9 +8,9 @@ The **FDTD** module, the **grid meshing** module, and part of the **gradient cal
 Original CPU version:
 
     docker pull psunsd/emopt:2023.1.16
-CUDA 11.2.0 + amd64: 
+CUDA 12.2.0 + amd64: 
 
-    docker pull psunsd/emopt-gpu:cuda11.2.0
+    docker pull psunsd/emopt-gpu:cuda12.2.0
 CUDA 12.2.2 + arm64: 
     
     docker pull psunsd/emopt-gpu-arm64:cuda12.2.0

@@ -1147,11 +1147,7 @@ class ModeMatch(object):
         float
             The mode match phase for forward-propagating fields.
         """
-        fwd_phase = np.angle(self.am)
-        if fwd_phase < np.pi/2.0:
-            return fwd_phase + np.pi
-        else:
-            return fwd_phase
+        return np.angle(self.am)
 
     def get_mode_match_back(self, P_in):
         """Get the mode match in the backwards direction normalized with respect to
@@ -1181,11 +1177,7 @@ class ModeMatch(object):
         float
             The mode match phase for backward-propagating fields.
         """
-        back_phase = np.angle(self.bm)
-        if back_phase < np.pi/2.0:
-            return back_phase + np.pi
-        else:
-            return back_phase
+        return np.angle(self.bm)
 
     def get_dFdEx_phase(self):
         ds = self.ds1*self.ds2

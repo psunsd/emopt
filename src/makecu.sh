@@ -25,7 +25,7 @@ nvcc -Xcompiler -fPIC -c -arch sm_52 \
 	-gencode=arch=compute_87,code=sm_87 \
 	-gencode=arch=compute_90,code=sm_90 \
 	-gencode=arch=compute_86,code=compute_86 Grid_CUDA.cu -o Grid_CUDA.o
-g++ -c -fPIC Grid_CPP.cpp -fopenmp -O3 -march=native -DNDEBUG -std=c++14 -o Grid.o -I/home/.emopt/include/ -I/usr/local/cuda/include/
+g++ -c -fPIC Grid_CPP.cpp -fopenmp -O3 -march=x86-64 -DNDEBUG -std=c++14 -o Grid.o -I/home/.emopt/include/ -I/usr/local/cuda/include/
 echo "Linking Grid..."
 g++ -shared -fopenmp -fPIC -o Grid.so Grid.o Grid_CUDA.o -lpthread -lrt -ldl -L/usr/local/cuda/lib64 -lcudart_static -lculibos
 echo "Copying objects..."

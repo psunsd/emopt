@@ -565,7 +565,7 @@ class AdjointMethod(with_metaclass(ABCMeta, object)):
             Zcomp = torch.complex(Z, torch.zeros_like(Z)).permute(2,1,0)
             fields_tensor = torch.tensor(1j*self.sim._Ex_fwd_t0_pbox[...]*self.sim._Ex_adj_t0_pbox[...])
             loss_grad = torch.dot(torch.flatten(fields_tensor), torch.flatten(Zcomp))
-            Z_grad = torch.autograd.grad(loss_grad, paramdiff, allow_unused=True)[0]
+            Z_grad = torch.autograd.grad(loss_grad.real, paramdiff, allow_unused=True)[0]
             gradient += -2*np.real(Z_grad.detach().numpy())
 
             # Ey
@@ -583,7 +583,7 @@ class AdjointMethod(with_metaclass(ABCMeta, object)):
             Zcomp = torch.complex(Z, torch.zeros_like(Z)).permute(2,1,0)
             fields_tensor = torch.tensor(1j*self.sim._Ey_fwd_t0_pbox[...]*self.sim._Ey_adj_t0_pbox[...])
             loss_grad = torch.dot(torch.flatten(fields_tensor), torch.flatten(Zcomp))
-            Z_grad = torch.autograd.grad(loss_grad, paramdiff, allow_unused=True)[0]
+            Z_grad = torch.autograd.grad(loss_grad.real, paramdiff, allow_unused=True)[0]
             gradient += -2*np.real(Z_grad.detach().numpy())
 
             # Ez
@@ -601,7 +601,7 @@ class AdjointMethod(with_metaclass(ABCMeta, object)):
             Zcomp = torch.complex(Z, torch.zeros_like(Z)).permute(2,1,0)
             fields_tensor = torch.tensor(1j*self.sim._Ez_fwd_t0_pbox[...]*self.sim._Ez_adj_t0_pbox[...])
             loss_grad = torch.dot(torch.flatten(fields_tensor), torch.flatten(Zcomp))
-            Z_grad = torch.autograd.grad(loss_grad, paramdiff, allow_unused=True)[0]
+            Z_grad = torch.autograd.grad(loss_grad.real, paramdiff, allow_unused=True)[0]
             gradient += -2*np.real(Z_grad.detach().numpy())
 
             return gradient
@@ -744,7 +744,7 @@ class AdjointMethod(with_metaclass(ABCMeta, object)):
         #del self.sim._Ez_fwd_t0
 
         #if(isinstance(self.sim, fdfd.FDFD_TE)):
-        dFdx = comm.bcast(dFdx, root=0)
+        #dFdx = comm.bcast(dFdx, root=0)
         #elif(isinstance(self.sim, fdfd.FDFD_3D)):
         #    pass
 

@@ -267,8 +267,11 @@ class FDTD(MaxwellSolver):
         else:
             self._pbox = DomainCoordinates((int(np.ceil(pbox[0]/dx)+1)-1)*dx, (int(np.ceil(pbox[1]/dx)+1)-1)*dx,
                        (int(np.ceil(pbox[2]/dy)+1)-1)*dy, (int(np.ceil(pbox[3]/dy)+1)-1)*dy,
-                       pbox[4], pbox[5], dx, dy, dz)
+                       (int(np.ceil(pbox[4]/dz)+1)-1)*dz, (int(np.ceil(pbox[5]/dz)+1)-1)*dz, dx, dy, dz)
 
+        self._Nxp = self._pbox.Nx
+        self._Nyp = self._pbox.Ny
+        self._Nzp = self._pbox.Nz
         self._wavelength = wavelength
         self._R = wavelength/(2*pi)
 
@@ -348,7 +351,7 @@ class FDTD(MaxwellSolver):
         libFDTD.FDTD_set_physical_dims(self._libfdtd, X, Y, Z, dx, dy, dz)
         libFDTD.FDTD_set_grid_dims(self._libfdtd, Nx, Ny, Nz)
         libFDTD.FDTD_set_local_grid(self._libfdtd, k0, j0, i0, K, J, I)
-        libFDTD.FDTD_set_local_grid_perturb(self._libfdtd, self._pbox.i1, self._pbox.i2)
+        libFDTD.FDTD_set_local_grid_perturb(self._libfdtd, self._pbox.i1, self._pbox.i2, self._pbox.j1, self._pbox.j2, self._pbox.k1, self._pbox.k2)
         libFDTD.FDTD_set_dt(self._libfdtd, dt)
         libFDTD.FDTD_set_field_arrays(self._libfdtd,
                 self._Ex, self._Ey, self._Ez,
@@ -777,8 +780,8 @@ class FDTD(MaxwellSolver):
                                                                   self._dy,
                                                                   self._dz)
             # visualize mode profile
-            import matplotlib.pyplot as pl
-            pl.imshow(np.flipud(abs(Jys[:,:,0])),vmin=0,vmax=15);pl.savefig('modeprofile.png');pl.close()
+            # import matplotlib.pyplot as pl
+            # pl.imshow(np.flipud(abs(Jys[:,:,0])),vmin=0,vmax=15);pl.savefig('modeprofile.png');pl.close()
             Jxs = COMM.bcast(Jxs, root=0)
             Jys = COMM.bcast(Jys, root=0)
             Jzs = COMM.bcast(Jzs, root=0)
@@ -855,19 +858,20 @@ class FDTD(MaxwellSolver):
             info_message('Building FDTD system...')
 
         eps = self._eps
-        mu = self._mu
+        # mu = self._mu
 
         pos, lens = self._da.getCorners()
         k0, j0, i0 = pos
         K, J, I = lens
 
         # # baseline eps without offset
-        # eps.get_values(k0,k0+K,j0,j0+J,i0,i0+I,sx=0.0,sy=0.0,sz=0.0,arr=self._eps_x.getArray())
-        # nslice=self._eps_x.getArray().real[K*J*50:K*J*51]
+        # eps.get_values(k0,k0+K,j0,j0+J,i0,i0+I,sx=0.0,sy=0.5,sz=-0.5,arr=self._eps_y.getArray())
+        # nslice=self._eps_y.getArray().real[K*J*49:K*J*50]
         # nidx=np.linspace(0,K*J-1,K*J)
         # nx=np.mod(nidx,K)
         # ny=np.floor(nidx/K)
-        # np.savetxt("origingeo_circles.csv",np.transpose([nslice,nx,ny]),fmt='%.18e',delimiter=',',header='n,x,y',comments='')
+        # np.savetxt("eps_x.csv",np.transpose([nslice,nx,ny]),fmt='%.18e',delimiter=',',header='n,x,y',comments='')
+        # input("Press Enter to continue")
 
         eps.get_values(k0, k0+K, j0, j0+J, i0, i0+I,
                        sx=0.5, sy=0.0, sz=-0.5,
@@ -911,12 +915,12 @@ class FDTD(MaxwellSolver):
             verbose = self.verbose
             self.verbose = 0
             # self.build()
-            if hasattr(self,'_eps_x_p')==False: self._eps_x_p=self._da.createGlobalVec()
-            if hasattr(self,'_eps_y_p')==False: self._eps_y_p=self._da.createGlobalVec()
-            if hasattr(self,'_eps_z_p')==False: self._eps_z_p=self._da.createGlobalVec()
+            if hasattr(self,'_eps_x_p')==False: self._eps_x_p=self._dap.createGlobalVec()
+            if hasattr(self,'_eps_y_p')==False: self._eps_y_p=self._dap.createGlobalVec()
+            if hasattr(self,'_eps_z_p')==False: self._eps_z_p=self._dap.createGlobalVec()
             eps = self._eps
             mu = self._mu
-            pos, lens = self._da.getCorners()
+            pos, lens = self._dap.getCorners()
             k0, j0, i0 = pos
             K, J, I = lens
             eps.get_values(k0, k0 + K, j0, j0 + J, i0, i0 + I,
@@ -933,10 +937,8 @@ class FDTD(MaxwellSolver):
 
         else:
             eps = self._eps
-            mu = self._mu
 
-            pos, lens = self._da.getCorners()
-            k0, j0, i0 = pos
+            pos, lens = self._dap.getCorners()
             K, J, I = lens
 
             bbox = DomainCoordinates(bbox[0], bbox[1], bbox[2], bbox[3],
@@ -947,42 +949,32 @@ class FDTD(MaxwellSolver):
 
             temp = np.zeros([sizes[0], sizes[1], sizes[2]], dtype=np.complex128)
 
-            li = slice(l_inds[0], l_inds[0]+sizes[0])
-            lj = slice(l_inds[1], l_inds[1]+sizes[1])
-            lk = slice(l_inds[2], l_inds[2]+sizes[2])
-
             self._i0 = l_inds[0]
             self._i1 = l_inds[0]+sizes[0]
+            self._j0 = l_inds[1]
+            self._j1 = l_inds[1]+sizes[1]
+            self._k0 = l_inds[2]
+            self._k1 = l_inds[2]+sizes[2]
             # update eps_x
-            eps_x = self._eps_x_p.getArray()
-            eps_x = np.reshape(eps_x, [I,J,K])
-
             eps.get_values(g_inds[2], g_inds[2]+sizes[2],
                            g_inds[1], g_inds[1]+sizes[1],
                            g_inds[0], g_inds[0]+sizes[0],
                            sx=0.5, sy=0.0, sz=-0.5,
-                           arr=temp)
-            eps_x[li, lj, lk] = temp
+                           arr=self._eps_x_p.getArray())
 
             # update eps_y
-            eps_y = self._eps_y_p.getArray()
-            eps_y = np.reshape(eps_y, [I,J,K])
             eps.get_values(g_inds[2], g_inds[2]+sizes[2],
                            g_inds[1], g_inds[1]+sizes[1],
                            g_inds[0], g_inds[0]+sizes[0],
                            sx=0.0, sy=0.5, sz=-0.5,
-                           arr=temp)
-            eps_y[li, lj, lk] = temp
+                           arr=self._eps_y_p.getArray())
 
             # update eps_z
-            eps_z = self._eps_z_p.getArray()
-            eps_z = np.reshape(eps_z, [I,J,K])
             eps.get_values(g_inds[2], g_inds[2]+sizes[2],
                            g_inds[1], g_inds[1]+sizes[1],
                            g_inds[0], g_inds[0]+sizes[0],
                            sx=0.0, sy=0.0, sz=0.0,
-                           arr=temp)
-            eps_z[li, lj, lk] = temp
+                           arr=self._eps_z_p.getArray())
 
     def update(self, bbox=None):
         """Update the permittivity and permeability distribution.
@@ -1888,9 +1880,9 @@ class FDTD(MaxwellSolver):
             A copy of the set of permittivity and permeability distributions used
             internally.
         """
-        eps_x = np.copy(self._eps_x.getArray())
-        eps_y = np.copy(self._eps_y.getArray())
-        eps_z = np.copy(self._eps_z.getArray())
+        eps_x = np.copy(self._eps_x_p0.getArray())
+        eps_y = np.copy(self._eps_y_p0.getArray())
+        eps_z = np.copy(self._eps_z_p0.getArray())
 
         return (eps_x, eps_y, eps_z)
 
@@ -1910,7 +1902,7 @@ class FDTD(MaxwellSolver):
         eps_x0, eps_y0, eps_z0 = Adiag0
         ydAx = np.zeros(self._Ex_fwd_t0_pbox[...].shape, dtype=np.complex128)
 
-        libFDTD.FDTD_calc_ydAx(self._libfdtd, self._Ex_fwd_t0_pbox[...].size, self._Nx, self._Ny, self._Nz, 0, self._i0, self._i1,
+        libFDTD.FDTD_calc_ydAx(self._libfdtd, self._Ex_fwd_t0_pbox[...].size, self._Nxp, self._Nyp, self._Nzp, 0, self._i1-self._i0,
                                ydAx,self._Ex_adj_t0_pbox[...], self._Ey_adj_t0_pbox[...], self._Ez_adj_t0_pbox[...],
                              self._Ex_fwd_t0_pbox[...], self._Ey_fwd_t0_pbox[...], self._Ez_fwd_t0_pbox[...], eps_x0, eps_y0, eps_z0,
                              self._eps_x_p[...], self._eps_y_p[...], self._eps_z_p[...])

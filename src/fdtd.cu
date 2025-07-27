@@ -1621,7 +1621,7 @@ __global__ void kernel_update_E_border(kernelpar *kpar)
     }
 }
 
-__global__ void kernel_calc_ydAx(size_t size, size_t Nx, size_t Ny, size_t Nz, size_t i0, size_t i1,
+__global__ void kernel_calc_ydAx(size_t size, size_t Nx, size_t Ny, size_t Nz, size_t i1, size_t i2,
                 thrust::complex<double> *ydAx,
                 thrust::complex<double> *Ex_adj, thrust::complex<double> *Ey_adj, thrust::complex<double> *Ez_adj,
                 thrust::complex<double> *Ex_fwd, thrust::complex<double> *Ey_fwd, thrust::complex<double> *Ez_fwd,
@@ -1634,16 +1634,15 @@ __global__ void kernel_calc_ydAx(size_t size, size_t Nx, size_t Ny, size_t Nz, s
     j = blockIdx.y * blockDim.y + threadIdx.y;
     i = blockIdx.z;
     if( k >=Nx || j>=Ny || i>=Nz ) { return; }
-    size_t ind = (i1-i0)*Nx*Ny + j *Nx+k;
-    size_t offset = Nx * Ny * i0;
+    size_t ind = (i2-i1)*Nx*Ny + j *Nx+k;
     if(ind >= size) { return; }
 
-    ydAx[ind] = Ex_adj[ind] * Ex_fwd[ind] * (epsxp[ind+offset]-epsx0[ind+offset]) +
-                Ey_adj[ind] * Ey_fwd[ind] * (epsyp[ind+offset]-epsy0[ind+offset]) +
-                Ez_adj[ind] * Ez_fwd[ind] * (epszp[ind+offset]-epsz0[ind+offset]);
+    ydAx[ind] = Ex_adj[ind] * Ex_fwd[ind] * (epsxp[ind]-epsx0[ind]) +
+                Ey_adj[ind] * Ey_fwd[ind] * (epsyp[ind]-epsy0[ind]) +
+                Ez_adj[ind] * Ez_fwd[ind] * (epszp[ind]-epsz0[ind]);
 }
 
-void fdtd::FDTD::calc_ydAx(size_t size, size_t Nx, size_t Ny, size_t Nz, size_t i0, size_t i1, size_t i2,
+void fdtd::FDTD::calc_ydAx(size_t size, size_t Nx, size_t Ny, size_t Nz, size_t i1, size_t i2,
                 std::complex<double> *ydAx,
                 std::complex<double> *Ex_adj, std::complex<double> *Ey_adj, std::complex<double> *Ez_adj,
                 std::complex<double> *Ex_fwd, std::complex<double> *Ey_fwd, std::complex<double> *Ez_fwd,
@@ -1679,9 +1678,6 @@ void fdtd::FDTD::calc_ydAx(size_t size, size_t Nx, size_t Ny, size_t Nz, size_t 
     gpuErrchk(cudaMemcpy(depsxp, epsxp, sizefull * sizeof(std::complex<double>), cudaMemcpyHostToDevice));
     gpuErrchk(cudaMemcpy(depsyp, epsyp, sizefull * sizeof(std::complex<double>), cudaMemcpyHostToDevice));
     gpuErrchk(cudaMemcpy(depszp, epszp, sizefull * sizeof(std::complex<double>), cudaMemcpyHostToDevice));
-
-//    kernel_calc_ydAx <<< ceil(size/128.0), 128 >>> (size, NxNy, i0, i1, dydAx, dEx_adj, dEy_adj, dEz_adj, dEx_fwd, dEy_fwd, dEz_fwd,
-//                depsx0, depsy0, depsz0, depsxp, depsyp, depszp);
 
     dim3 block_dim(128,1);
     dim3 grid_dim((int)ceil(Nx/128.0), (int)ceil(Ny/1.0));
@@ -1797,9 +1793,11 @@ void fdtd::FDTD::set_local_grid(int k0, int j0, int i0, int K, int J, int I)
 
 }
 
-void fdtd::FDTD::set_local_grid_perturb(int i1, int i2)
+void fdtd::FDTD::set_local_grid_perturb(int i1, int i2, int j1, int j2, int k1, int k2)
 {
     _i1 = i1; _i2 = i2;
+    _j1 = j1; _j2 = j2;
+    _k1 = k1; _k2 = k2;
 }
 
 void fdtd::FDTD::set_wavelength(double wavelength)
@@ -3903,8 +3901,8 @@ void fdtd::FDTD::set_t0_arrays(complex128 *Ex_t0, complex128 *Ey_t0, complex128 
 void fdtd::FDTD::set_t1_arrays(complex128 *Ex_t1, complex128 *Ey_t1, complex128 *Ez_t1,
 complex128 *Hx_t1, complex128 *Hy_t1, complex128 *Hz_t1)
 {
-_Ex_t1 = Ex_t1; _Ey_t1 = Ey_t1; _Ez_t1 = Ez_t1;
-_Hx_t1 = Hx_t1; _Hy_t1 = Hy_t1; _Hz_t1 = Hz_t1;
+    _Ex_t1 = Ex_t1; _Ey_t1 = Ey_t1; _Ez_t1 = Ez_t1;
+    _Hx_t1 = Hx_t1; _Hy_t1 = Hy_t1; _Hz_t1 = Hz_t1;
 }
 
 void fdtd::FDTD::capture_pbox_fields(std::complex<double> *Ex_full, std::complex<double> *Ey_full,
@@ -3914,10 +3912,10 @@ void fdtd::FDTD::capture_pbox_fields(std::complex<double> *Ex_full, std::complex
     int ind_full, ind_pbox;
 
     for(int i = _i1; i < _i2; i++) {
-        for(int j = 0; j < _J; j++) {
-            for(int k = 0; k < _K; k++) {
+        for(int j = _j1; j < _j2; j++) {
+            for(int k = _k1; k < _k2; k++) {
                 ind_full = i*_J*_K + j*_K + k;
-                ind_pbox = (i-_i1)*_J*_K + j*_K + k;
+                ind_pbox = (i-_i1)*(_j2-_j1)*(_k2-_k1) + (j-_j1)*(_k2-_k1) + (k-_k1);
 
                 Ex_pbox[ind_pbox] = Ex_full[ind_full];
                 Ey_pbox[ind_pbox] = Ey_full[ind_full];
@@ -4376,9 +4374,9 @@ void FDTD_set_local_grid(fdtd::FDTD* fdtd,
 }
 
 void FDTD_set_local_grid_perturb(fdtd::FDTD* fdtd,
-                         int i1, int i2)
+                         int i1, int i2, int j1, int j2, int k1, int k2)
 {
-    fdtd->set_local_grid_perturb(i1, i2);
+    fdtd->set_local_grid_perturb(i1, i2, j1, j2, k1, k2);
 }
 
 void FDTD_set_dt(fdtd::FDTD* fdtd, double dt)
@@ -4456,14 +4454,14 @@ void FDTD_solve(fdtd::FDTD* fdtd)
     fdtd->solve();
 }
 
-void FDTD_calc_ydAx(fdtd::FDTD* fdtd, size_t size, size_t Nx, size_t Ny, size_t Nz, size_t i0, size_t i1, size_t i2,
+void FDTD_calc_ydAx(fdtd::FDTD* fdtd, size_t size, size_t Nx, size_t Ny, size_t Nz, size_t i1, size_t i2,
                 std::complex<double> *ydAx,
                 std::complex<double> *Ex_adj, std::complex<double> *Ey_adj, std::complex<double> *Ez_adj,
                 std::complex<double> *Ex_fwd, std::complex<double> *Ey_fwd, std::complex<double> *Ez_fwd,
                 std::complex<double> *epsx0, std::complex<double> *epsy0, std::complex<double> *epsz0,
                 std::complex<double> *epsxp, std::complex<double> *epsyp, std::complex<double> *epszp)
 {
-    fdtd->calc_ydAx(size, Nx, Ny, Nz, i0, i1, i2, ydAx, Ex_adj, Ey_adj, Ez_adj, Ex_fwd, Ey_fwd, Ez_fwd,
+    fdtd->calc_ydAx(size, Nx, Ny, Nz, i1, i2, ydAx, Ex_adj, Ey_adj, Ez_adj, Ex_fwd, Ey_fwd, Ez_fwd,
                 epsx0, epsy0, epsz0, epsxp, epsyp, epszp);
 }
 

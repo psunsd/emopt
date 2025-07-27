@@ -43,7 +43,7 @@ libFDTD.FDTD_set_local_grid.argtypes = [c_void_p,
 libFDTD.FDTD_set_local_grid.restype = None
 
 libFDTD.FDTD_set_local_grid_perturb.argtypes = [c_void_p,
-                                        c_int, c_int]
+                                        c_int, c_int, c_int, c_int, c_int, c_int]
 libFDTD.FDTD_set_local_grid_perturb.restype = None
 
 libFDTD.FDTD_set_dt.argtypes = [c_void_p, c_double]
@@ -92,7 +92,7 @@ libFDTD.FDTD_block_CUDA_src_free.argtypes = [c_void_p]
 libFDTD.FDTD_block_CUDA_src_free.restype = None
 libFDTD.FDTD_block_CUDA_src_malloc_memcpy.argtypes = [c_void_p]
 libFDTD.FDTD_block_CUDA_src_malloc_memcpy.restype = None
-libFDTD.FDTD_calc_ydAx.argtypes = [c_void_p, c_ulong, c_ulong, c_ulong, c_ulong, c_ulong, c_ulong, c_ulong, c_complex_p, c_complex_p, c_complex_p, c_complex_p,c_complex_p, c_complex_p, c_complex_p,
+libFDTD.FDTD_calc_ydAx.argtypes = [c_void_p, c_ulong, c_ulong, c_ulong, c_ulong, c_ulong, c_ulong, c_complex_p, c_complex_p, c_complex_p, c_complex_p,c_complex_p, c_complex_p, c_complex_p,
                                    c_complex_p, c_complex_p, c_complex_p,c_complex_p, c_complex_p, c_complex_p]
 libFDTD.FDTD_calc_ydAx.restype = None
 

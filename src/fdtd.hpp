@@ -240,8 +240,8 @@ namespace fdtd {
             // size and location of local chunk in grid
             int _I, _J, _K, _i0, _j0, _k0;
 
-            // Z-index of the perturbed domain
-            int _i1, _i2;
+            // Z-index of the perturbed domain - expanded to x,y,z
+            int _i1, _i2, _j1, _j2, _k1, _k2;
 
             // physical simulation size and Yee cell size in x,y,z
             double _X, _Y, _Z, _dx, _dy, _dz;
@@ -422,7 +422,7 @@ namespace fdtd {
             void set_local_grid(int k0, int j0, int i0, int K, int J, int I);
 
             // set Z-index of the perturbed box domain: i1-lower Z, i2-upper Z
-            void set_local_grid_perturb(int i1, int i2);
+            void set_local_grid_perturb(int i1, int i2, int j1, int j2, int k1, int k2);
 
             /*!
              * Set the wavelength of the simulation.
@@ -489,7 +489,7 @@ namespace fdtd {
             void block_CUDA_multigpu_init();
             void block_CUDA_multigpu_free();
 
-            void calc_ydAx(size_t size, size_t Nx, size_t Ny, size_t Nz, size_t i0, size_t i1, size_t i2,
+            void calc_ydAx(size_t size, size_t Nx, size_t Ny, size_t Nz, size_t i1, size_t i2,
                 std::complex<double> *ydAx,
                 std::complex<double> *Ex_adj, std::complex<double> *Ey_adj, std::complex<double> *Ez_adj,
                 std::complex<double> *Ex_fwd, std::complex<double> *Ey_fwd, std::complex<double> *Ez_fwd,
@@ -730,7 +730,7 @@ extern "C" {
                                  int k0, int j0, int i0,
                                  int K, int J, int I);
         void FDTD_set_local_grid_perturb(fdtd::FDTD* fdtd,
-                                 int i1, int i2);
+                                 int i1, int i2, int j1, int j2, int k1, int k2);
         void FDTD_set_dt(fdtd::FDTD* fdtd, double dt);
         void FDTD_set_complex_eps(fdtd::FDTD* fdtd, bool complex_eps);
         void FDTD_set_rtol(fdtd::FDTD* fdtd, double rtol);
@@ -746,7 +746,7 @@ extern "C" {
         void FDTD_block_CUDA_malloc_memcpy(fdtd::FDTD* fdtd);
         void FDTD_block_CUDA_src_malloc_memcpy(fdtd::FDTD* fdtd);
         void FDTD_copyCUDA_field_arrays(fdtd::FDTD* fdtd);
-        void FDTD_calc_ydAx(fdtd::FDTD* fdtd, size_t size, size_t Nx, size_t Ny, size_t Nz, size_t i0, size_t i1, size_t i2,
+        void FDTD_calc_ydAx(fdtd::FDTD* fdtd, size_t size, size_t Nx, size_t Ny, size_t Nz, size_t i1, size_t i2,
                 std::complex<double> *ydAx,
                 std::complex<double> *Ex_adj, std::complex<double> *Ey_adj, std::complex<double> *Ez_adj,
                 std::complex<double> *Ex_fwd, std::complex<double> *Ey_fwd, std::complex<double> *Ez_fwd,

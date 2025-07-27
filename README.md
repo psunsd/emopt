@@ -10,10 +10,10 @@ Original CPU version:
     docker pull psunsd/emopt:2023.1.16
 CUDA 12.2.0 + amd64: 
 
-    docker pull psunsd/emopt-gpu:cuda12.2.0
+    docker pull psunsd/emopt-gpu:cuda12.2.2
 CUDA 12.2.2 + arm64: 
     
-    docker pull psunsd/emopt-gpu-arm64:cuda12.2.0
+    docker pull psunsd/emopt-gpu-arm64:cuda12.2.2
 
 ## FDTD module
 The GPU-FDTD module is benchmarked on 13 GPU models of Volta, Turing, Ampere and Hopper architectures.  A single Tesla V100 GPU can achieve ~3x FDTD throughput as that of the CPU-EMopt on an HPE Superdome Flex S280 server with 16x 18-core CPUs.

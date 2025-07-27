@@ -606,26 +606,36 @@ class AdjointMethod(with_metaclass(ABCMeta, object)):
 
             return gradient
         else:
-            sim._eps_x_p = sim._da.createGlobalVec()
-            sim._eps_y_p = sim._da.createGlobalVec()
-            sim._eps_z_p = sim._da.createGlobalVec()
-            pos,lens = sim._da.getCorners()
-            k0,j0,i0 = pos
-            K,J,I = lens
+            update_boxes = self.get_update_boxes(sim, params)
+            bbox = update_boxes[0]
+            bbox = DomainCoordinates(bbox[0], bbox[1], bbox[2], 
+                                     bbox[3], bbox[4], bbox[5], 
+                                     sim._dx, sim._dy, sim._dz)
+            g_inds, l_inds, d_inds, sizes = sim._FDTD__get_local_domain_overlap(bbox)
+
+            ### unperturbed eps
+            sim._eps_x_p0 = sim._dap.createGlobalVec()
+            sim._eps_y_p0 = sim._dap.createGlobalVec()
+            sim._eps_z_p0 = sim._dap.createGlobalVec()
+            ### perturbed eps
+            sim._eps_x_p = sim._dap.createGlobalVec()
+            sim._eps_y_p = sim._dap.createGlobalVec()
+            sim._eps_z_p = sim._dap.createGlobalVec()
+            i0,j0,k0 = g_inds
+            I,J,K = sizes
             sim._eps.get_values(k0,k0+K,j0,j0+J,i0,i0+I,
                                 sx=0.5, sy=0.0, sz=-0.5,
-                                arr=sim._eps_x_p.getArray())
+                                arr=sim._eps_x_p0.getArray())
             sim._eps.get_values(k0,k0+K,j0,j0+J,i0,i0+I,
                                 sx=0.0, sy=0.5, sz=-0.5,
-                                arr=sim._eps_y_p.getArray())
+                                arr=sim._eps_y_p0.getArray())
             sim._eps.get_values(k0,k0+K,j0,j0+J,i0,i0+I,
                                 sx=0.0, sy=0.0, sz=0.0,
-                                arr=sim._eps_z_p.getArray())
+                                arr=sim._eps_z_p0.getArray())
 
             Ai = sim.get_A_diag()
 
             step = self._step
-            update_boxes = self.get_update_boxes(sim, params)
             lenp = len(params)
 
             grad_full = None
@@ -653,6 +663,16 @@ class AdjointMethod(with_metaclass(ABCMeta, object)):
                 # calculate dAdp and assemble the full result on the master node
                 product = sim.calc_ydAx(Ai)
 
+                # ### debug field and eps
+                # eps_x,eps_y,eps_z=Ai
+                # nslice=sim._eps_x_p.getArray().real[K*J*7:K*J*8]
+                # nidx=np.linspace(0,K*J-1,K*J)
+                # nx=np.mod(nidx,K)
+                # ny=np.floor(nidx/K)
+                # np.savetxt("eps_xp.csv",np.transpose([eps_x.real[K*J*7:K*J*8],nslice,nx,ny]),fmt='%.18e',delimiter=',',header='n0,np,x,y',comments='')
+                # np.savetxt("fields.csv",np.transpose([np.abs(sim._Ey_fwd_t0_pbox[K*J*7:K*J*8]),np.abs(sim._Ey_adj_t0_pbox[K*J*7:K*J*8]),nx,ny]),fmt='%.18e',delimiter=',',header='fwd,adj,x,y',comments='')
+                # input("Press Enter to continue")
+
                 grad_part = -2*np.real( product/step )
                 grad_parts.append(grad_part)
 
@@ -677,6 +697,10 @@ class AdjointMethod(with_metaclass(ABCMeta, object)):
                 if(NOT_PARALLEL):
                     gradient[i] = np.sum(grad_full)
 
+            sim._eps_x_p0.destroy()
+            sim._eps_y_p0.destroy()
+            sim._eps_z_p0.destroy()
+            del sim._eps_x_p0; del sim._eps_y_p0; del sim._eps_z_p0
             sim._eps_x_p.destroy()
             sim._eps_y_p.destroy()
             sim._eps_z_p.destroy()
@@ -860,7 +884,6 @@ class AdjointMethod(with_metaclass(ABCMeta, object)):
             if(NOT_PARALLEL):
                 grad_fd[i] = (fom1-fom0)/fd_step
             params[j] = p0
-
 
         if(NOT_PARALLEL):
             errors = np.abs(grad_fd - grad_am[indices]) / np.abs(grad_fd)

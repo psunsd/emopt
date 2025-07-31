@@ -265,9 +265,7 @@ class FDTD(MaxwellSolver):
         if pbox is None:
             self._pbox = DomainCoordinates(0, (Nx-1)*dx, 0, (Ny-1)*dy, 0, (Nz-1)*dz, dx, dy, dz)
         else:
-            self._pbox = DomainCoordinates((int(np.ceil(pbox[0]/dx)+1)-1)*dx, (int(np.ceil(pbox[1]/dx)+1)-1)*dx,
-                       (int(np.ceil(pbox[2]/dy)+1)-1)*dy, (int(np.ceil(pbox[3]/dy)+1)-1)*dy,
-                       (int(np.ceil(pbox[4]/dz)+1)-1)*dz, (int(np.ceil(pbox[5]/dz)+1)-1)*dz, dx, dy, dz)
+            self._pbox = DomainCoordinates(pbox[0],pbox[1],pbox[2],pbox[3],pbox[4],pbox[5], dx, dy, dz)
 
         self._Nxp = self._pbox.Nx
         self._Nyp = self._pbox.Ny

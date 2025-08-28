@@ -64,6 +64,19 @@ __version__ = "2023.1.16"
 __maintainer__ = "Andrew Michaels"
 __status__ = "development"
 
+def Kahan_dot(x: PETSc.Vec, y: PETSc.Vec):
+    xa = x.getArray()
+    ya = y.getArray()
+    s=0+0j
+    c=0+0j
+    for xi,yi in zip(xa, ya):
+        prod = np.conjugate(xi)*yi
+        yk=prod-c
+        t=s+yk
+        c=(t-s)-yk
+        s=t
+    return s
+
 class ModeSolver(with_metaclass(ABCMeta, object)):
     """A generic interface for electromagnetic mode solvers.
 
@@ -1238,12 +1251,15 @@ class ModeFullVector(ModeSolver):
 
         # setup vectors for the solution
         self._x = []
+        self._y = []
         self._neff = np.zeros(neigs, dtype=np.complex128)
         vr, wr = self._A.getVecs()
         self._x.append(vr)
+        self._y.append(wr)
 
         for i in range(neigs-1):
             self._x.append(self._x[0].copy())
+            self._y.append(self._y[0].copy())
 
         ib, ie = self._A.getOwnershipRange()
         self.ib = ib
@@ -1603,6 +1619,7 @@ class ModeFullVector(ModeSolver):
         self._solver.setProblemType(SLEPc.EPS.ProblemType.GNHEP)
         self._solver.setDimensions(self.neigs, PETSc.DECIDE)
         self._solver.setTarget(self.n0) # "guess" for effective index
+        self._solver.setTwoSided(True)  # solve 2-sided eigenproblem for left and right vectors
         self._solver.setFromOptions()
 
         # Solve Ax=nBx using SLEPc.
@@ -1625,6 +1642,13 @@ class ModeFullVector(ModeSolver):
         for i in range(neigs):
             self.neff[i] = self._solver.getEigenvalue(i)
             self._solver.getEigenvector(i, self._x[i])
+            ### get left eigenvector and normalize
+            self._solver.getLeftEigenvector(i, self._y[i])
+            tmpvec = self._B.createVecRight()
+            self._B.mult(self._x[i], tmpvec)
+            yBx = Kahan_dot(self._y[i], tmpvec)
+            self._y[i].scale(1/np.conjugate(yBx))
+            tmpvec.destroy()
 
     def __permute_field_component(self, component):
         ## Permute the field components to account for planes with non-z normal

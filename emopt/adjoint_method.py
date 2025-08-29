@@ -185,6 +185,7 @@ from . import fdtd
 from .misc import info_message, warning_message, error_message, RANK, \
 NOT_PARALLEL, run_on_master, N_PROC, COMM, DomainCoordinates
 from . import fomutils
+from .modes import Kahan_dot
 
 import numpy as np
 from math import pi
@@ -209,6 +210,777 @@ __license__ = "BSD-3"
 __version__ = "2023.1.16"
 __maintainer__ = "Peng Sun"
 __status__ = "development"
+
+class AdjointMethodEigen(with_metaclass(ABCMeta, object)):
+    """Adjoint Method Class
+
+    Defines the core functionality needed to compute the gradient of a function
+    of the form
+
+    .. math:
+        F \\rightarrow F(\\mathbf{E}, \\mathbf{H}, \\vec{p})
+
+    with respect to an arbitrary set of design variables :math:`\\vec{p}`.
+    In general, the gradient is given by
+
+    .. math::
+        \\nabla F = \\nabla_\mathrm{AM} F + \\frac{\partial F}{\partial \\vec{p}}
+
+    where :math:`\\nabla_\\mathrm{AM} F` is the gradient of :math:`F` computed
+    using the adjoint method, and the remaining gradient term corresponds to
+    any explicit dependence of the figure of merit on the design parameters.
+    The derivatives of these quantities are assumed to be known and should be
+    computed using :meth:`.AdjointMethod.calc_grad_p` function.
+
+    In order to use the AdjointMethod class, it should extended and the
+    abstract methods :meth:`.AdjointMethod.update_system`,
+    :meth:`.AdjointMethod.calc_fom`, :meth:`.AdjointMethod.calc_dFdx`, and
+    :meth:`.AdjointMethod.calc_grad_p` should be implemented for the desired
+    application.
+
+    Notes
+    -----
+    Currently source derivatives are not supported.  If needed, this should not
+    be too difficult to achieve by extending :class:`.AdjointMethod`
+
+    Parameters
+    ----------
+    sim : emopt.simulation.MaxwellSolver
+        Simulation object
+    step : float
+        Step sized used in the calculation of :math:`\partial A / \partial p_i`
+
+    Attributes
+    ----------
+    sim : emopt.simulation.MaxwellSolver
+        Simulation object
+    step : float
+        Step sized used in the calculation of :math:`\partial A / \partial p_i`
+
+    Methods
+    -------
+    update_system(params)
+        **(ABSTRACT METHOD)** Update the geometry of the system.
+    calc_fom(sim, params)
+        **(ABSTRACT METHOD)** Calculate the figure of merit.
+    calc_dFdx(sim, params)
+        **(ABSTRACT METHOD)** Calculate the derivative of the figure of merit
+        with respect to the electric and magnetic field vectors.
+    get_update_boxes(sim, params)
+        Define update boxes which specify which portion of the underlying
+        spatial grid is modified by each design variable.
+    fom(params)
+        Get the figure of merit.
+    calc_gradient(sim, params)
+        Calculate the figure of merit in a general way.
+    gradient(params)
+        Get the gradient for at the current set of design parameter values.
+    """
+
+    def __init__(self, modes, step=1e-3):
+        self.modes = modes
+        self.prev_params = []
+        self._step = step
+        self._UseAutoDiff = False
+
+    @property
+    def step(self):
+        """
+        Step size used for numerical differentiation of :math:`A`
+
+        :getter: Returns the step size.
+        :setter: Sets the step size
+        :type: float
+        """
+        return self._step
+
+    @step.setter
+    def step(self, val):
+        if(np.abs(val) > self.modes.dx/1e3):
+            if(NOT_PARALLEL):
+                warning_message('Step size used for adjoint method may be too '
+                                'large.  Consider reducing it to ~1e-3*dx')
+        self._step = val
+
+    @abstractmethod
+    def update_system(self, params):
+        """Update the geometry/material distributions of the system.
+
+        In order to calculate the gradient of a figure of merit, we need to
+        define a mapping between the abstract design parameters of the system
+        (which are contained in the vector :samp:`params`) and the underlying
+        geometry or material distribution which makes up the physical system.
+        We define this mapping here.
+
+        Notes
+        -----
+        In general, calculation of the gradient involves calling this function
+        once per design variable.  In other words, if :samp:`len(params)` is
+        equal to N, then this method is called at least N times in order to
+        calculate the gradient.  For cases where N is large, it is recommended
+        an effort be made to avoid performing very costly operations in this
+        method.
+
+        Parameters
+        ----------
+        params : numpy.ndarray
+            1D array containing design parameter values (one value per design
+            parameter)
+        """
+        pass
+
+    @abstractmethod
+    def calc_fom(self, modes, params):
+        """Calculate the figure of merit.
+
+        Notes
+        -----
+        This function is called by the :func:`.AdjointMethod.fom` function. In
+        this case, update_system(params) and sim.solve_forward() are guaranteed
+        to be called before this function is executed.
+
+        If this function is called outside of the :func:`.AdjointMethod.fom`
+        function (which is not advised), it is up to the caller to ensure that
+        the :func:`.emopt.FDFD.solve_forward` has been run previously.
+
+        Parameters
+        ----------
+        sim : emopt.fdfd.FDFD
+            Simulation object
+        params : numpy.ndarray
+            1D vector containing design parameter values.
+        """
+        pass
+
+    @abstractmethod
+    def calc_dFdx(self, modes, params):
+        """Calculate the derivative of the figure of merit with respect to the
+        vector containing the electric and magnetic fields.
+
+        In order to calculate the gradient of the figure of merit, an adjoint
+        simulation must first be run.  The sources in the adjoint simulation are
+        given by :math:`\partial F / \partial x` where :math:`F` is the figure of
+        merit and :math:`x` is a vector containing the electric and magnetic fields
+        contained on a discreter grid.  Because we are differentiating with respect
+        to a vector, the resulting derivative will also be a vector.
+
+        This function must be overriden and implemented to calculate the derivative
+        of the figure of merit defined in :func:`calc_fom`.
+
+        The exact format of :math:`x` depends on the exact type of
+        :class:`emopt.fdfd.FDFD` object which generated it.  Consult
+        :mod:`emopt.fdfd` for details.
+
+        See Also
+        --------
+        emopt.fdfd.FDFD : Base class for simulators which generate :math:`x`
+        """
+        pass
+
+    @abstractmethod
+    def calc_dFdn(self, modes, params):
+        """Calculate the derivative of the figure of merit with respect to the
+        vector containing the electric and magnetic fields.
+
+        In order to calculate the gradient of the figure of merit, an adjoint
+        simulation must first be run.  The sources in the adjoint simulation are
+        given by :math:`\partial F / \partial x` where :math:`F` is the figure of
+        merit and :math:`x` is a vector containing the electric and magnetic fields
+        contained on a discreter grid.  Because we are differentiating with respect
+        to a vector, the resulting derivative will also be a vector.
+
+        This function must be overriden and implemented to calculate the derivative
+        of the figure of merit defined in :func:`calc_fom`.
+
+        The exact format of :math:`x` depends on the exact type of
+        :class:`emopt.fdfd.FDFD` object which generated it.  Consult
+        :mod:`emopt.fdfd` for details.
+
+        See Also
+        --------
+        emopt.fdfd.FDFD : Base class for simulators which generate :math:`x`
+        """
+        pass
+
+    @abstractmethod
+    def calc_grad_p(self, modes, params):
+        """Compute the gradient of of the figure of merit with respect to the
+        design variables :math:`\\vec{p}`, **holding the fields
+        constant**.
+
+        This function should calculate the list of partial derivatives
+        of the figure of merit with respect to each design variable
+
+        .. math:
+            \\frac{\\partial F}{\\partial \\vec{p}} =
+            \\left[\\frac{\\partial F}{\\partial p_1}, \\frac{\\partial
+            F}{\\partial p_2}, \\cdots, \\frac{\\partial F}{\\partial p_N}\\right]
+
+        This allows us to include an explicit dependence on the design
+        variables in our figure of merit. This is useful for imposing
+        constraints in an optimization.
+
+        Notes
+        -----
+        This function is executed in parallel on all nodes.  If execution on
+        master node is desired, you can either apply the @run_on_master
+        decorator or use if(NOT_PARALLEL).
+
+        Parameters
+        ----------
+        sim : emoptg.fdfd.FDFD
+            The FDFD object
+        params : numpy.ndarray
+            The array containing the current set of design parameters
+
+        Returns
+        -------
+        numpy.ndarray
+            The partial derivatives with respect to the design variables.
+        """
+        pass
+
+    # @abstractmethod
+    def calc_gradient_manual(self, modes, params):
+        pass
+
+    def get_update_boxes(self, modes, params):
+        """Get update boxes used to speed up the updating of A.
+
+        In order to compute the gradient, we need to calculate how A changes
+        with respect to modification of the design variables.  This generally
+        requires updating the material values in A.  We can speed this process
+        up by only updating the part of the system which is affect by the
+        modification of each design variable.
+
+        By default, the update boxes cover the whole simulation area.  This
+        method can be overriden in order to modify this behavior.
+
+        Parameters
+        ----------
+        sim : FDFD
+            Simulation object.  sim = self.sim
+        params : numpy.array or list of floats
+            List of design parameters.
+
+        Returns
+        -------
+            Either a list of tuples or a list of lists of tuples containing
+            (xmin, xmax, ymin, ymax) in 2D and (xmin, xmax, ymin, ymax, zmin,
+            zmax) in 3D which describes which portion of the system should be
+            update during gradient calculations.
+        """
+        X = modes._M * modes.dx
+        Y = modes._N * modes.dy
+        lenp = len(params)
+        return [(0, X, 0, Y) for i in range(lenp)]
+
+    def fom(self, params):
+        """Run a forward simulation and calculate the figure of merit.
+
+        Notes
+        -----
+        The simualtion is performed in parallel with the help of all of the
+        MPI node, however the calculation of the figure of merit itself is
+        currently only performed on the master node (RANK == 0)
+
+        Parameters
+        ----------
+        params : numpy.ndarray
+            List of design parameters of the system
+
+        Returns
+        -------
+        float
+            **(Master node only)** The figure of merit :math:`F(\mathbf{E},\mathbf{H} ; \mathbf{p})`
+        """
+        # update the system using the design parameters
+        self.update_system(params)
+        self.prev_params = params
+
+        self.modes.build()
+        self.modes.solve()
+        return self.calc_fom(self.modes, params)
+
+    def solve_adjoint(self, params):
+        ### Solve the adjoint eigenproblem of (A-nB)*lam=(I-xy^H*B)*dFdx^H
+        b_np = self.calc_dFdx(params)
+        if np.linalg.norm(b_np) < 1E-12:
+            ### b=0 -> lam=0
+            lam = PETSc.Vec().createWithArray(np.zeros_like(b_np))
+            self.lam0 = lam
+        else:
+            b = PETSc.Vec().createWithArray(b_np)
+            tmpvec = self.modes._B.createVecRight()
+            self.modes._B.mult(b, tmpvec)
+            alpha = Kahan_dot(self.modes._y[self.modeidx], tmpvec)  ### y^H*(B*b)
+
+            rhs = b.duplicate()
+            rhs.copy(b)
+            rhs.axpy(-alpha, self.modes._x[self.modeidx])   ### rhs = b-alpha*x
+
+            M = self.modes._A.copy()
+            M.axpy(-self.modes.neff[self.modeidx], self.modes._B)   ### M = A-nB
+
+            ksp = PETSc.KSP().create(self.modes._A.getComm())
+            ksp.setOperators(M)
+            ksp.setType('gmres')
+            ksp.getPC().setType('none')
+            ksp.setFromOptions()
+
+            lam = rhs.duplicate()
+            ksp.solve(rhs, lam)
+            its = ksp.getIterationNumber()
+            reason = ksp.getConvergedReason()
+            PETSc.Sys.Print(f"KSP converged in {its} iterations with reason {reason}")
+
+            Bx = self.modes._x[self.modeidx].duplicate()
+            self.modes._B.mult(lam, Bx)
+            alpha = Kahan_dot(self.modes._x[self.modeidx], Bx)
+            Bx2 = self.modes._x[self.modeidx].duplicate()
+            self.modes._B.mult(self.modes._x[self.modeidx], Bx2)
+            normx2 = Kahan_dot(self.modes._x[self.modeidx], Bx2)
+            lam.axpy(-alpha/normx2, self.modes._x[self.modeidx])    ### y^H * B * lam = 0
+            self.lam0 = lam
+
+    def calc_gradient(self, params):
+        """ Calculate dF/dx*dx/dp + dF/dn*dn/dp in the same method
+        
+        dn/dp is calculated via Hellman-Feynman theorem: y^H*dA/dp*x
+        dF/dx*dx/dp is calculated via the adjoint problem of (A-nB)*lam=(I-xy^H)*dF/dx^H
+
+        dn/dp is computed with Hellman-Feynman theorem: y^H * dA/dp * x:
+        math:`A` with respect to the design parameters of
+        the system, i.e. :math:`\partial A / \partial p_i`. In the most general
+        case, we can compute this derivative using finite differences. This
+        involves perturbing each design variable of the system by a small
+        amount one at a time and updating :math:`A`.  Doing so allows us to
+        approximate the derivative as
+
+        .. math::
+            \\frac{\partial A}{\partial p_i} \\approx \\frac{A(p_i + \Delta p) - A(p_i)}{\Delta p}
+
+        So long as :math:`\Delta p` is small enough, this approximation is
+        quite accurate.
+
+        This function handles this process.
+
+        Notes
+        -----
+        1. This function is called after the forward and adjoint simulations have
+        been executed.
+
+        2. Technically, a centered difference would be more accurate, however
+        this whole implementation relies on mesh smoothing which allows us to
+        make very small steps :math:`\Delta p` and thus in reality, the benefit
+        is negligable.
+
+        Parameters
+        ----------
+        sim : FDFD
+            Simulation object.  sim = self.sim
+        params : numpy.array or list of floats
+            List of design parameters.
+
+        Returns
+        -------
+        numpy.array
+            **(Master node only)** Gradient of figure of merit, i.e. list of
+            derivatives of fom with respect to each design variable
+        """
+        # get the current diagonal elements of A.
+        # only these elements change when the design variables change.
+
+        step = self._step
+        lenp = len(params)
+        self.params = params
+
+        grad_full = None
+        grad_parts = []
+        if(RANK == 0):
+            grad_full = np.zeros(N_PROC, dtype=np.double)
+
+        A0 = self.modes._A.copy()
+        dFdn = self.calc_dFdn(params)
+        gradient = np.zeros(lenp)
+        for ii in range(lenp):
+            print("param",ii+1,"of",lenp, datetime.now().isoformat()+'\033[1A\r')
+            p0 = params[ii]
+
+            # perturb the system
+            params[ii] += step
+            self.update_system(params)
+            self.modes.build()
+
+            #### dA/dp = (A-A0)/step
+            dAdp = self.modes._A.copy()
+            dAdp.axpy(-1.0, A0, structure=PETSc.Mat.Structure.SUBSET_NONZERO_PATTERN)
+            dAdp.scale(1.0/step)
+
+            ### Hellman-Feynman theorem: dn/dp = y^H dA x
+            tmpvec = dAdp.createVecRight()
+            dAdp.mult(self.modes._x[self.modeidx], tmpvec)
+            dndp = np.real(Kahan_dot(self.modes._y[self.modeidx], tmpvec))
+
+            ### dFdx * dxdp
+            dxdp = np.real(Kahan_dot(self.lam0, tmpvec))
+            ### -dFdx * dxdp + dFdn * dndp
+            grad_parts.append(dFdn * dndp - dxdp)
+
+            # # revert the parameters
+            params[ii] = p0
+
+        ### revert the system to original
+        self.update_system(params)
+        self.modes.build()
+
+        COMM.Barrier()
+        for ii in range(lenp):
+            grad_full = COMM.gather(grad_parts[ii], root=0)
+            if(NOT_PARALLEL):
+                gradient[ii] = np.sum(grad_full)
+
+        if(NOT_PARALLEL):
+            return gradient
+
+    def gradient(self, params):
+        """Manage the calculation of the gradient figure of merit.
+
+        To calculate the gradient, we update the system, run a forward and
+        adjoint simulation, and then calculate the gradient using
+        :func:`calc_gradient`.  Most of these operations are done in parallel
+        using MPI.
+
+        Parameters
+        ----------
+        params : numpy.ndarray
+            List of design parameters of the system
+
+        Returns
+        -------
+        numpy.ndarray
+            (Master node only) The gradient of the figure of merit computed  with 
+            respect to the design variables
+        """
+        # update system
+        print('Update system:'+datetime.now().isoformat())
+        self.update_system(params)
+        self.modes.build()
+
+        # Solve the forward problem
+        if(not np.array_equal(self.prev_params, params)):
+            self.modes.solve()
+
+        # Solve the adjoint problem
+        print('Solve adjoint problem:'+datetime.now().isoformat())
+        self.solve_adjoint(params)
+
+        if(NOT_PARALLEL):
+            info_message('Calculating gradient...')
+
+        grad_f = self.calc_gradient(params)
+        grad_p = self.calc_grad_p(params)
+
+        if(NOT_PARALLEL):
+            self.current_gradient = grad_f
+            return grad_f + grad_p
+        else:
+            return None
+
+    def check_gradient(self, params, indices=[], plot=True, verbose=True,
+                       return_gradients=False):
+        """Verify that the gradient is accurate.
+
+        It is highly recommended that the accuracy of the gradients be checked
+        prior to being used. If the accuracy is above ~1%, it is likely that
+        there is an inconsistency between how the figure of merit and adjoint
+        sources (dFdx) are being computed.
+
+        The adjoint method gradient error is evaluated by comparing the
+        gradient computed using the adjoint method to a gradient computed by
+        direct finite differences.  In other words, the "correct" derivatives
+        to which the adjoint method gradient is compared are given by
+
+        .. math::
+            \\frac{\partial F}{\partial p_i} \\approx \\frac{F(p_i + \Delta p) - F(p_i)}{\Delta p}
+
+        Note that this method for calculating the gradient is not used in a
+        practical setting because it requires performing N+1 simulations in
+        order to compute the gradient with respect to N design variables
+        (compared to only 2 simulations in the case of the adjoint method).
+
+        Parameters
+        ----------
+        params : numpy.ndarray
+            design parameters
+        indices : list or numpy.ndarray
+            list of gradient indices to check. An empty list indicates that the
+            whole gradient should be verified. A subset of indices may be
+            desirable for large problems.  (default = [])
+        plot : bool (optional)
+            Plot the gradients and errors (default = True)
+        verbose : bool (optional)
+            If True, print progress (default = True)
+        return_gradients : bool
+            If True, return the gradient arrays (default = False)
+
+        Returns
+        -------
+        float
+            Relative error in gradient.
+        """
+
+        if(indices == []):
+            indices = np.arange(0, len(params),1)
+
+        # make sure everything is up to date
+        self.update_system(params)
+        self.modes.build()
+
+        grad_am = self.gradient(params)
+        grad_fd = np.zeros(len(indices))
+
+        fom0 = self.fom(params)
+        fd_step = self.step
+        # calculate the "true" derivatives using finite differences
+        if(NOT_PARALLEL and verbose):
+            info_message('Checking gradient...')
+
+        for i in range(len(indices)):
+            if(NOT_PARALLEL and verbose):
+                print('\tDerivative %d of %d' % (i+1, len(indices)))
+
+            j = indices[i]
+            p0 = params[j]
+            params[j] += fd_step
+            fom1 = self.fom(params)
+            if(NOT_PARALLEL):
+                grad_fd[i] = (fom1-fom0)/fd_step
+            params[j] = p0
+
+        ### revert system to original states
+        self.update_system(params)
+        self.modes.build()
+        self.modes.solve()
+
+        if(NOT_PARALLEL):
+            errors = np.abs(grad_fd - grad_am[indices]) / np.abs(grad_fd)
+            error_tot = np.linalg.norm(grad_fd - grad_am[indices]) / np.linalg.norm(grad_fd)
+
+            if(error_tot < 0.01 and verbose):
+                info_message('The total error in the gradient is %0.4E' % \
+                             (error_tot))
+            else:
+                warning_message('The total error in the gradient is %0.4E '
+                                'which is over 1%%' % (error_tot), \
+                                'emopt.adjoint_method')
+
+            if(plot):
+                import matplotlib.pyplot as plt
+                f = plt.figure()
+                ax1 = f.add_subplot(311)
+                ax2 = f.add_subplot(312)
+                ax3 = f.add_subplot(313)
+
+                xs = np.arange(len(indices))
+                ax1.bar(xs, grad_fd)
+                ax1.set_title('Finite Differences')
+                ax2.bar(xs, grad_am[indices])
+                ax2.set_title('Adjoint Method')
+                ax3.bar(xs, errors)
+                ax3.set_title('Error in Adjoint Method')
+
+                for ax in [ax1, ax2, ax3]:
+                    ax.set_xticklabels(['%d' % i for i in indices])
+
+                ax3.set_yscale('log', nonposy='clip')
+
+                plt.show()
+
+            if(return_gradients):
+                return error_tot, grad_fd, grad_am
+            else:
+                return error_tot
+        else:
+            if(return_gradients):
+                return None, None, None
+            return None
+
+class AdjointMethodEigenMO(with_metaclass(ABCMeta, AdjointMethodEigen)):
+    """An AdjointMethod object for an ensemble of different figures of merit
+    (Multi-objective adjoint method).
+
+    In many situations, it is desirable to calculate the sensitivities of a
+    structure corresponding to multiple objective functions.  A simple common
+    exmaple of this a broadband figure of merit which considers the performance
+    of structure at a range of different excitation frequencies/wavelengths.
+    In other cases, it may be desirable to calculate a total sensitivity which
+    is made up of two different figures of merit which are calculated for the
+    same excitation.
+
+    In either case, we need a way to easily handle these more complicated
+    figures of merits and their gradients (i.e. the sensitivities). This class
+    provides a simple interface to do just that.  By overriding calc_total_fom
+    and calc_total_gradient, you can build up more complicated figures of
+    merit.
+
+    Parameters
+    ----------
+    ams : list of :class:`.AdjointMethod`
+        A list containing *extended* AdjointMethod objects
+
+    Attributes
+    ----------
+    adjoint_methods : list of :class:`.AdjointMethod`
+        A list containing extended AdjointMethod objects
+    """
+
+    def __init__(self, ams, step=1e-6):
+        self._ams = ams
+        self._foms_current = np.zeros(len(ams))
+        self._step = step
+
+    @property
+    def adjoint_methods(self):
+        return self._ams
+
+    @adjoint_methods.setter
+    def adjoint_methods(self, new_ams):
+        self._ams = new_ams
+
+    def update_system(self, params):
+        """Update all of the individual AdjointMethods."""
+        for am in self._ams:
+            am.update_system(params)
+
+    def calc_fom(self, modes, params):
+        """Calculate the figure of merit.
+        """
+        # this just redirects to calc_total_foms
+        return self.calc_total_fom(self._foms_current)
+
+    def calc_dFdx(self, modes, params):
+        pass
+
+    def calc_dFdn(self, modes, params):
+        pass
+
+    def calc_grad_p(self, modes, params):
+        pass
+
+    @abstractmethod
+    def calc_total_fom(self, foms):
+        """Calculate the 'total' figure of merit based on a list of evaluated
+        objective functions.
+
+        The user should override this function in order to define how all of the
+        individual figures of merit are combined to form a single 'total'
+        figure of merit. This may be a sum of the input FOMs, a minimax of the
+        FOMs, etc.  A common example is to combine figures of merit calculated
+        for different wavelengths of operation.
+
+        See Also
+        --------
+        :ref:`emopt.fomutils` : functions which may be useful for combining figures of merit
+
+        Parameters
+        ----------
+        foms : list of float
+            List containing individual FOMs which are used to compute the total
+            figure of merit.
+
+        Returns
+        -------
+        float
+            The total figure of merit
+        """
+        pass
+
+    @abstractmethod
+    def calc_total_gradient(self, foms, grads):
+        """Calculate the 'total' gradient of a figure of merit based on a list
+        of evaluated objective functions.
+
+        The user should override this function in order to define the gradient
+        of the total figure of merit.
+
+        See Also
+        --------
+        :ref:`emopt.fomutils` : functions which may be useful for combining figures of merit and their gradients.
+
+        Parameters
+        ----------
+        foms : list
+            List of individual foms
+        grads : list
+            List of individual grads
+
+        Returns
+        -------
+        numpy.ndarray
+            1D numpy array containing total gradient. note: the output vector
+            should have the same shape as the input vectors contained in grads
+        """
+        pass
+
+    def fom(self, params):
+        """Calculate the total figure of merit.
+
+        Notes
+        -----
+        Overrides :class:`.AdjointMethod`.fom(...)
+
+        Parameters
+        ----------
+        params : numpy.ndarray
+            Design parameters
+
+        Returns
+        -------
+        float
+            (Master node only) The total figure of merit
+        """
+        foms = []
+
+        for am in self._ams:
+            foms.append(am.fom(params))
+
+        self._foms_current = foms
+        if(NOT_PARALLEL):
+            fom_total = self.calc_total_fom(foms)
+            return fom_total
+        else:
+            return None
+
+    def gradient(self, params):
+        """Calculate the total gradient.
+
+        Notes
+        -----
+        Overrides :class:`.AdjointMethod`.gradient(...)
+
+        Parameters
+        ----------
+        params : numpy.ndarray
+            Design parameters with respect to which gradient is evaluated
+
+        Returns
+        -------
+        numpy.ndarray
+            (Master node only) The gradient of total figure of merit.
+        """
+        foms = []
+        grads = []
+
+        for am in self._ams:
+            grads.append( am.gradient(params) )
+            foms.append( am.calc_fom(am.modes, params) )
+
+        if(NOT_PARALLEL):
+            grad_total = self.calc_total_gradient(foms, grads)
+            return grad_total
+        else:
+            return None
 
 class AdjointMethod(with_metaclass(ABCMeta, object)):
     """Adjoint Method Class

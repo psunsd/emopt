@@ -231,21 +231,6 @@ __global__ void init_mat(T *mat, size_t len, T val)
     mat[ind_global] = val;
 }
 
-__global__ void kernel_copy_eps(kernelpar *kpar)
-{
-//     1D grid of 1D blocks
-    size_t ind_global = blockIdx.x * blockDim.x + threadIdx.x;
-    if (ind_global >= kpar->I*kpar->J*kpar->K) return;
-
-    int i, j, k;
-    i = ind_global/(kpar->J*kpar->K);
-    j = (ind_global%(kpar->J*kpar->K))/kpar->K;
-    k = (ind_global%(kpar->J*kpar->K))%kpar->K;
-
-    kpar->epsx[ind_global] = kpar->epsx_full[(i+kpar->i0)*kpar->Ny*kpar->Nx + (j+kpar->j0)*kpar->Nx + k + kpar->k0];
-    kpar->epsy[ind_global] = kpar->epsy_full[(i+kpar->i0)*kpar->Ny*kpar->Nx + (j+kpar->j0)*kpar->Nx + k + kpar->k0];
-    kpar->epsz[ind_global] = kpar->epsz_full[(i+kpar->i0)*kpar->Ny*kpar->Nx + (j+kpar->j0)*kpar->Nx + k + kpar->k0];
-}
 
 __global__ void kernel_calc_complex_fields(double t0, double t1, double t2, double *F_t0, double *F_t1, double *F_t2, size_t len, complex128 *F_out)
 {
@@ -2093,21 +2078,35 @@ void fdtd::FDTD::block_CUDA_multigpu_init()
         gpuErrchk(cudaMalloc((void **)&depsx, mat_len*sizeof(complex128)));
         gpuErrchk(cudaMalloc((void **)&depsy, mat_len*sizeof(complex128)));
         gpuErrchk(cudaMalloc((void **)&depsz, mat_len*sizeof(complex128)));
-        gpuErrchk(cudaMalloc((void **)&depsx_full, _Nx*_Ny*_Nz*sizeof(complex128)));
-        gpuErrchk(cudaMalloc((void **)&depsy_full, _Nx*_Ny*_Nz*sizeof(complex128)));
-        gpuErrchk(cudaMalloc((void **)&depsz_full, _Nx*_Ny*_Nz*sizeof(complex128)));
-        gpuErrchk(cudaMemcpy(depsx_full, _eps_x, _Nx*_Ny*_Nz*sizeof(complex128), cudaMemcpyHostToDevice));
-        gpuErrchk(cudaMemcpy(depsy_full, _eps_y, _Nx*_Ny*_Nz*sizeof(complex128), cudaMemcpyHostToDevice));
-        gpuErrchk(cudaMemcpy(depsz_full, _eps_z, _Nx*_Ny*_Nz*sizeof(complex128), cudaMemcpyHostToDevice));
+
+        // host temporary buffers for local subdomain
+        complex128* h_epsx_sub = (complex128*)malloc(mat_len*sizeof(complex128));
+        complex128* h_epsy_sub = (complex128*)malloc(mat_len*sizeof(complex128));
+        complex128* h_epsz_sub = (complex128*)malloc(mat_len*sizeof(complex128));
+        // extract subdomain directly from full host arrays
+        for(int i=0;i<_kpar_host->I;i++){
+            for(int j=0;j<_kpar_host->J;j++){
+                for(int k=0;k<_kpar_host->K;k++){
+                    size_t loc = i*_kpar_host->J*_kpar_host->K+j*_kpar_host->K+k;
+                    size_t glob = (i+_kpar_host->i0)*_Ny*_Nx + (j+_kpar_host->j0)*_Nx+(k+_kpar_host->k0);
+                    h_epsx_sub[loc] = _eps_x[glob];
+                    h_epsy_sub[loc] = _eps_y[glob];
+                    h_epsz_sub[loc] = _eps_z[glob];
+                }
+            }
+        }
+        // copy directly to device
+        gpuErrchk(cudaMemcpy(depsx, h_epsx_sub, mat_len*sizeof(complex128), cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpy(depsy, h_epsy_sub, mat_len*sizeof(complex128), cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpy(depsz, h_epsz_sub, mat_len*sizeof(complex128), cudaMemcpyHostToDevice));
+        free(h_epsx_sub);
+        free(h_epsy_sub);
+        free(h_epsz_sub);
 
         _kpar_host->epsx = depsx; _kpar_host->epsy = depsy; _kpar_host->epsz = depsz;
-        _kpar_host->epsx_full = depsx_full; _kpar_host->epsy_full = depsy_full; _kpar_host->epsz_full = depsz_full;
         
         gpuErrchk(cudaMemcpy(_kpar_list[device_id], _kpar_host, sizeof(kernelpar), cudaMemcpyHostToDevice));
         numBlocks = ceil(mat_len/(double)blockdim);
-        kernel_copy_eps <<< numBlocks, blockdim >>> (_kpar_list[device_id]);
-
-        gpuErrchk(cudaFree(depsx_full)); gpuErrchk(cudaFree(depsy_full)); gpuErrchk(cudaFree(depsz_full));
 
         // PML
         if(k0t < _w_pml_x0){

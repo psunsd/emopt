@@ -97,7 +97,6 @@ typedef struct kernelparams {
     double *E_ghostleft, *H_ghostleft, *E_bufferleft, *H_bufferleft,
         *E_ghostright, *H_ghostright, *E_bufferright, *H_bufferright;
     complex128 *epsx, *epsy, *epsz;
-    complex128 *epsx_full, *epsy_full, *epsz_full;
 
     complex128 *Jx, *Jy, *Jz, *Mx, *My, *Mz;
 
@@ -277,7 +276,6 @@ namespace fdtd {
 
             // eps arrays on GPU
             complex128 *depsx, *depsy, *depsz;        
-            complex128 *depsx_full, *depsy_full, *depsz_full;
 
 
             // source dimensions

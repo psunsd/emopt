@@ -359,12 +359,15 @@ class ModeTE(ModeSolver):
 
         # setup vectors for the solution
         self._x = []
+        self._y = []
         self._neff = np.zeros(neigs, dtype=np.complex128)
         vr, wr = self._A.getVecs()
         self._x.append(vr)
+        self._y.append(wr)
 
         for i in range(neigs-1):
             self._x.append(self._x[0].copy())
+            self._y.append(self._y[0].copy())
 
         self._fields = [np.array([]) for i in range(self.neigs)]
         self._Ez = [np.zeros(self._N, dtype=np.complex128) for i in \
@@ -529,6 +532,7 @@ class ModeTE(ModeSolver):
         self._solver.setProblemType(SLEPc.EPS.ProblemType.GNHEP)
         self._solver.setDimensions(self.neigs, PETSc.DECIDE)
         self._solver.setTarget(self.n0)
+        self._solver.setTwoSided(True)  # solve 2-sided eigenproblem for left and right vectors
         self._solver.setFromOptions()
 
         self._solver.solve()
@@ -548,6 +552,13 @@ class ModeTE(ModeSolver):
         for i in range(neigs):
             self.neff[i] = self._solver.getEigenvalue(i)
             self._solver.getEigenvector(i, self._x[i])
+            ### get left eigenvector and normalize
+            self._solver.getLeftEigenvector(i, self._y[i])
+            tmpvec = self._B.createVecRight()
+            self._B.mult(self._x[i], tmpvec)
+            yBx = Kahan_dot(self._y[i], tmpvec)
+            self._y[i].scale(1/np.conjugate(yBx))
+            tmpvec.destroy()
 
             # Save the full result on the master node so it can be accessed in the
             # future

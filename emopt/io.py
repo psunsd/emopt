@@ -230,6 +230,132 @@ def plot_iteration(field, structure, W, H, foms, fname='', layout='auto',
         plt.show()
 
 @run_on_master
+def plot_iteration_1D(field, structure, W, H, foms, fname='', layout='auto',
+                   show_now=False, dark=True, Nmats=2):
+    """
+    Plot the current iteration of an optimization for 1D field/structure.
+      - top subplot: overlay field and structure vs x in [0, H]
+      - bottom subplot: FOM vs iteration
+    
+    Parameters
+    ----------
+    field : 1D numpy.ndarray
+        Field profile along x.
+    structure : 1D numpy.ndarray
+        Structure profile along x.
+    W : float
+        Width of the simulation domain (unused here, kept for interface).
+    H : float
+        Length along x (sets the domain of the plot).
+    foms : dict
+        Dictionary of FOM histories {name: list or array}.
+    fname : str
+        Output filename (PDF/PNG).
+    show_now : bool
+        Whether to display the plot interactively.
+    dark : bool
+        Use dark theme if True.
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.gridspec as gridspec
+
+    dpi = 300
+
+    # colors
+    if dark:
+        cols = {
+            'text': '#BBBBBB',
+            'bg': '#101010',
+            'plot_bg': '#353535',
+            'grid': '#555555',
+            'field': '#3d9aff',
+            'struct': '#ffb84d',
+        }
+    else:
+        cols = {
+            'text': '#000000',
+            'bg': '#FFFFFF',
+            'plot_bg': '#FFFFFF',
+            'grid': '#DDDDDD',
+            'field': '#1f77b4',
+            'struct': '#ff7f0e',
+        }
+
+    # layout: 2 rows
+    f = plt.figure(figsize=(10, 6))
+    gs = gridspec.GridSpec(2, 1, height_ratios=[1, 1], hspace=0.3)
+
+    ax_top = f.add_subplot(gs[0, 0])
+    ax_bot = f.add_subplot(gs[1, 0])
+
+    # x axis [0,H]
+    x_field = np.linspace(0.0, H, len(field))
+    x_struct = np.linspace(0.0, H, len(structure))
+
+    # scale field to match index magnitude
+    s_min, s_max = np.min(structure), np.max(structure)
+    s_range = s_max - s_min
+    f_max = np.max(np.abs(field)) + 1e-12
+    field_scaled = field / f_max * s_range + s_min
+
+    # overlay field and structure
+    ax_top.plot(x_field, field_scaled, label="field (scaled)",
+                color=cols['field'], linewidth=1.5)
+    ax_top.plot(x_struct, structure, label="index",
+                color=cols['struct'], linewidth=1.5, alpha=0.9)
+
+    ax_top.set_xlim(0, H)
+    # ymin = min(np.min(field), np.min(structure))
+    # ymax = max(np.max(field), np.max(structure))
+    # ax_top.set_ylim(ymin - 0.05 * abs(ymax - ymin + 1e-12),
+    #                 ymax + 0.05 * abs(ymax - ymin + 1e-12))
+    ax_top.set_ylim(s_min - 0.1*s_range, s_max + 0.1*s_range)
+    ax_top.set_xlabel("x")
+    ax_top.set_ylabel("Index/ Scaled field")
+    ax_top.legend(loc="best", frameon=False)
+    ax_top.grid(True, linewidth=0.4, color=cols['grid'])
+
+    # ---- FOMs subplot ----
+    current_foms = []
+    for desc, fom in foms.items():
+        iters = np.arange(len(fom))
+        current_foms.append(fom[-1])
+        ax_bot.plot(iters, fom, '.-', label=desc, markersize=6)
+    ax_bot.set_xlabel("Iteration")
+    ax_bot.set_ylabel("Figure of Merit")
+    ax_bot.legend(loc="best", frameon=False)
+    ax_bot.grid(True, linewidth=0.4, color=cols['grid'])
+
+    # title
+    Niter = len(next(iter(foms.values()))) if foms else 0
+    f.suptitle("Iteration %d, " % Niter +
+               " ".join([f"{k}={v:.4f}" for k, v in zip(foms.keys(), current_foms)]),
+               fontsize=12, color=cols['text'])
+
+    # apply theme
+    if dark:
+        f.patch.set_facecolor(cols['bg'])
+        for ax in [ax_top, ax_bot]:
+            ax.set_facecolor(cols['plot_bg'])
+            for tl in ax.get_xticklabels() + ax.get_yticklabels():
+                tl.set_color(cols['text'])
+            ax.xaxis.label.set_color(cols['text'])
+            ax.yaxis.label.set_color(cols['text'])
+            for spine in ax.spines.values():
+                spine.set_color(cols['text'])
+
+    # save / show
+    if fname:
+        plt.savefig(fname, dpi=dpi,
+                    facecolor=cols['bg'] if dark else 'w',
+                    bbox_inches="tight")
+    if show_now:
+        plt.tight_layout()
+        plt.show()
+
+    plt.close(f)
+
+@run_on_master
 def save_results(fname, data, additional=None):
     """Save an hdf5 file containing common simulation and optimization results.
 

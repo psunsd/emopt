@@ -171,7 +171,7 @@ def install_petsc(install_dir):
     # compile
     os.environ['PETSC_DIR'] = '/home/emopt/build/'+petsc_folder
     print_message('Configuring PETSc...')
-    call(["./configure", "--with-scalar-type=complex", "--with-mpi=1",
+    call(["./configure", "--with-scalar-type=complex", "--with-mpi=1", "--with-64-bit-indices",
           "--COPTFLAGS='-O3'", "--FOPTFLAGS='-O3'", "--CXXOPTFLAGS='-O3'",  
           "--with-debugging=0", "--prefix="+install_dir, "--download-scalapack", 
           "--download-mumps", "--download-fblaslapack=1"])

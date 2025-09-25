@@ -33,7 +33,8 @@ RUN pip3 install mpi4py==3.0.3 --user
 RUN pip3 install petsc4py==3.16.0 --user
 RUN pip3 install slepc4py==3.16.0 --user
 RUN pip3 install future --user
-RUN cd /home/emopt/ && python3.8 setup.py install --user
+#RUN cd /home/emopt/ && python3.8 setup.py install --user
+RUN pip3 install shapely --user
 
 RUN apt-get install -y bash
 RUN cd /home/emopt/src && bash makecu.sh

@@ -53,6 +53,8 @@ libGrid.StructuredMaterial2D_delete.argtypes = [c_void_p]
 libGrid.StructuredMaterial2D_delete.restype = None
 libGrid.StructuredMaterial2D_add_primitive.argtypes = [c_void_p, c_void_p]
 libGrid.StructuredMaterial2D_add_primitive.restype = None
+libGrid.StructuredMaterial2D_remove_primitive.argtypes = [c_void_p, c_void_p]
+libGrid.StructuredMaterial2D_remove_primitive.restype = None
 
 ####################################################################################
 # MaterialPrimitives configuration
@@ -173,6 +175,9 @@ libGrid.StructuredMaterial3D_delete.restype = None
 libGrid.StructuredMaterial3D_add_primitive.argtypes = [c_void_p, c_void_p,
                                                        c_double, c_double]
 libGrid.StructuredMaterial3D_add_primitive.restype = None
+libGrid.StructuredMaterial3D_remove_primitive.argtypes = [c_void_p, c_void_p,
+                                                       c_double, c_double]
+libGrid.StructuredMaterial3D_remove_primitive.restype = None
 libGrid.StructuredMaterial3D_set_Nsubcell.argtypes = [c_void_p, c_int]
 libGrid.StructuredMaterial3D_set_Nsubcell.restype = None
 

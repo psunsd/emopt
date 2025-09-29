@@ -1007,3 +1007,31 @@ class StructuredMaterial3D(Material3D):
         libGrid.StructuredMaterial3D_add_primitive(self._object, prim._object,
                                                   z1, z2)
 
+    def remove_primitive(self, prim, z1, z2):
+        """Remove a primitive from the StructuredMaterial.
+
+        This could be an emopt.grid.Rectangle, emopt.grid.Polygon,
+        etc--anything that extends emopt.grid.MaterialPrimitive.
+
+        Parameters
+        ----------
+        prim : MaterialPrimitive
+            The MaterialPrimitive to add.
+        z1 : float
+            The minimum z-coordinate of the primitive to add.
+        z2 : float
+            The maximum z-coordinate of the primitive to add.
+        """
+        for i, p in enumerate(self._primitives):
+            if p is prim and self._zmins[i] == z1 and self._zmaxs[i] == z2:
+                del self._primitives[i]
+                del self._zmins[i]
+                del self._zmaxs[i]
+                break
+        else:
+            raise ValueError("Primitive not found in this StructuredMaterial")
+
+        # --- forward to C++ backend ---
+        libGrid.StructuredMaterial3D_remove_primitive(
+            self._object, prim._object, z1, z2
+        )

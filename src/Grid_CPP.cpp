@@ -495,6 +495,21 @@ void StructuredMaterial2D::add_primitives(std::list<MaterialPrimitive*> primitiv
     }
 }
 
+void StructuredMaterial2D::remove_primitive(MaterialPrimitive* prim)
+{
+    for (auto it = _primitives.begin(); it != _primitives.end(); ++it) {
+        if (*it == prim) {
+            _primitives.erase(it);
+            return;
+        }
+    }
+}
+
+bool StructuredMaterial2D::is_empty() const
+{
+    return _primitives.empty();
+}
+
 void StructuredMaterial2D::get_values(ArrayXcd& grid, int k1, int k2, int j1, int j2, double sx, double sy)
 {
     int N = k2 - k1;
@@ -753,6 +768,51 @@ void StructuredMaterial3D::add_primitive(MaterialPrimitive* prim, double z1, dou
     }
 }
 
+void StructuredMaterial3D::remove_primitive(MaterialPrimitive* prim, double z1, double z2)
+{
+    // sanity checks
+    if (z1 == z2) {
+        std::cout << "Warning in Structured3DMaterial::remove_primitive: "
+                  << "Provided layer has no thickness. Ignored."
+                  << std::endl;
+        return;
+    } else if (z2 < z1) {
+        std::cout << "Warning in Structured3DMaterial::remove_primitive: "
+                  << "Negative thickness range. Ignored."
+                  << std::endl;
+        return;
+    }
+
+    auto itz = _zs.begin();
+    auto itl = _layers.begin();
+
+    // remove primitive from relevant layers
+    while (itl != _layers.end() && itz != _zs.end()) {
+        double z = *itz;
+
+        if (z >= z1 && z < z2) {
+            (*itl)->remove_primitive(prim);
+        }
+
+        ++itz;
+        ++itl;
+    }
+
+    // cleanup: remove any empty layers
+    itz = _zs.begin();
+    itl = _layers.begin();
+    while (itl != _layers.end() && itz != _zs.end()) {
+        if ((*itl)->is_empty()) {
+            delete *itl;  // free memory
+            itl = _layers.erase(itl);
+            itz = _zs.erase(itz);
+        } else {
+            ++itl;
+            ++itz;
+        }
+    }
+}
+
 void StructuredMaterial3D::set_Nsubcell(int Nsubcell)
 {
     _Nsubcell = Nsubcell;
@@ -974,7 +1034,7 @@ void StructuredMaterial3D::get_values(ArrayXcd& grid, int k1, int k2,
 //        kernel_get_values_Ncell <<< grid_dim, block_dim >>> (_kpar_device);
         invoke_kernel_get_values_Ncell(_kpar_device, grid_dim, block_dim);
         cudaerr = cudaDeviceSynchronize();
-        if(cudaerr!=cudaSuccess){ printf("kernel launch status \"%s\".\n", cudaGetErrorString(cudaerr)); }
+        if(cudaerr!=cudaSuccess){ printf("kernel launch No.%d status \"%s\".\n", i, cudaGetErrorString(cudaerr)); }
     }
 //     cudaerr = cudaGetLastError();
 //     printf("last status \"%s\".\n", cudaGetErrorString(cudaerr));
@@ -1177,6 +1237,17 @@ void StructuredMaterial2D_add_primitive(StructuredMaterial2D* sm,
                                       MaterialPrimitive* prim)
 {
 	sm->add_primitive(prim);
+}
+
+void StructuredMaterial2D_remove_primitive(StructuredMaterial2D* sm,
+                                      MaterialPrimitive* prim)
+{
+	sm->remove_primitive(prim);
+}
+
+bool StructuredMaterial2D_is_empty(StructuredMaterial2D* sm)
+{
+	return sm->is_empty();
 }
 
 /////////////////////////////////////////////////////////////////////////////////////
@@ -1442,6 +1513,13 @@ void StructuredMaterial3D_add_primitive(StructuredMaterial3D* sm,
                                         double z1, double z2)
 {
   sm->add_primitive(prim, z1, z2);
+}
+
+void StructuredMaterial3D_remove_primitive(StructuredMaterial3D* sm,
+                                        MaterialPrimitive* prim,
+                                        double z1, double z2)
+{
+  sm->remove_primitive(prim, z1, z2);
 }
 
 void StructuredMaterial3D_set_Nsubcell(StructuredMaterial3D* sm, int Nsubcell)

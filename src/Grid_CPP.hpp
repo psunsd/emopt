@@ -487,6 +487,18 @@ class StructuredMaterial2D : public Material2D {
 		void add_primitive(MaterialPrimitive* prim);
         void add_primitives(std::list<MaterialPrimitive*> primitives);
 
+		/* Remove a primitive object from the Material.
+		 * @prim the primitive to remove.
+		 *
+		 * References to primitives are stored in an internal vector.  Working with references
+		 * are advantageous as it allows the user to modify the geometry with minimal fuss
+		 * between simulations.  This, however, necessitates that the corresponding 
+		 * <MaterialPrimitive> objects not go out of scope while the StructuredMaterial is
+		 * still in use.
+		 */
+		void remove_primitive(MaterialPrimitive* prim);
+        bool is_empty() const;
+
 		/* Get the complex material value at an indexed position.
 		 * @x the x index (column) of the material value
 		 * @y the y index (row) of the material value
@@ -665,6 +677,18 @@ class StructuredMaterial3D : public Material3D {
 		 * still in use.
 		 */
 		void add_primitive(MaterialPrimitive* prim, double z1, double z2);
+		
+		/* Remove a primitive object to the Material.
+		 * @prim the primitive to remove.
+		 * @z1 and @z2 the lower and upper z bounds of the primitive
+		 *
+		 * References to primitives are stored in the internal vector _layers.  Working with references
+		 * are advantageous as it allows the user to modify the geometry with minimal fuss
+		 * between simulations.  This, however, necessitates that the corresponding 
+		 * <MaterialPrimitive> objects not go out of scope while the StructuredMaterial is
+		 * still in use.
+		 */
+		void remove_primitive(MaterialPrimitive* prim, double z1, double z2);
 
 		void set_Nsubcell(int Nsubcell);
 
@@ -725,6 +749,8 @@ extern "C" {
 	StructuredMaterial2D* StructuredMaterial2D_new(double w, double h, double dx, double dy);
 	void StructuredMaterial2D_delete(StructuredMaterial2D* sm);
 	void StructuredMaterial2D_add_primitive(StructuredMaterial2D* sm, MaterialPrimitive* prim);
+	void StructuredMaterial2D_remove_primitive(StructuredMaterial2D* sm, MaterialPrimitive* prim);
+	bool StructuredMaterial2D_is_empty(StructuredMaterial2D* sm);
 
     ////////////////////////////////////////////////////////////////////////////////
 	// MaterialPrimitive
@@ -808,6 +834,7 @@ extern "C" {
     StructuredMaterial3D* StructuredMaterial3D_new(double X, double Y, double Z, double dx, double dy, double dz);
 	void StructuredMaterial3D_delete(StructuredMaterial3D* sm);
 	void StructuredMaterial3D_add_primitive(StructuredMaterial3D* sm, MaterialPrimitive* prim, double z1, double z2);
+	void StructuredMaterial3D_remove_primitive(StructuredMaterial3D* sm, MaterialPrimitive* prim, double z1, double z2);
     void StructuredMaterial3D_set_Nsubcell(StructuredMaterial3D* sm, int Nsubcell);
 
     ////////////////////////////////////////////////////////////////////////////////

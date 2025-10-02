@@ -1,5 +1,15 @@
 #!/bin/bash
 
+ARCH=$(uname -m)
+if [ "$ARCH" = "x86_64" ]; then
+    MARCH_FLAG="-march=x86-64"
+elif [ "$ARCH" = "aarch64" ]; then
+    MARCH_FLAG="-march=native"
+else
+    echo "Unknown architecture: $ARCH"
+    exit 1
+fi
+
 echo "Compiling FDTD..."
 nvcc -Xcompiler -fPIC -O3 -std=c++14 -arch sm_52 \
 	-gencode=arch=compute_52,code=sm_52 \
@@ -25,7 +35,7 @@ nvcc -Xcompiler -fPIC -c -arch sm_52 \
 	-gencode=arch=compute_87,code=sm_87 \
 	-gencode=arch=compute_90,code=sm_90 \
 	-gencode=arch=compute_86,code=compute_86 Grid_CUDA.cu -o Grid_CUDA.o
-g++ -c -fPIC Grid_CPP.cpp -fopenmp -O3 -march=x86-64 -DNDEBUG -std=c++14 -o Grid.o -I/home/.emopt/include/ -I/usr/local/cuda/include/
+g++ -c -fPIC Grid_CPP.cpp -fopenmp -O3 $MARCH_FLAG -DNDEBUG -std=c++14 -o Grid.o -I/home/.emopt/include/ -I/usr/local/cuda/include/
 echo "Linking Grid..."
 g++ -shared -fopenmp -fPIC -o Grid.so Grid.o Grid_CUDA.o -lpthread -lrt -ldl -L/usr/local/cuda/lib64 -lcudart_static -lculibos
 echo "Copying objects..."

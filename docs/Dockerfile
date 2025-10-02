@@ -41,6 +41,14 @@ RUN cd /home/emopt/src && bash makecu.sh
 
 ENV PYTHONPATH "/home/.local/lib/python3.8/site-packages:/home/.local/lib/python3.8/site-packages/emopt-2023.1.16-py3.8.egg"
 
-RUN pip3 install --extra-index-url https://download.pytorch.org/whl/cu121 torch==2.4.1+cu121 networkx==2.8.8
+ARG TARGETARCH
+RUN echo "Building for architecture: ${TARGETARCH}"
+RUN if [ "${TARGETARCH}" = "amd64" ]; then\
+        pip3 install --extra-index-url https://download.pytorch.org/whl/cu121 torch==2.4.1+cu121 networkx==2.8.8
+    elif [ "${TARGETARCH}" = "arm64" ]; then \
+        pip3 install torch==2.4.1 networkx==2.8.8; \
+    else \
+        echo "Unsupported architecture: ${TARGETARCH}" && exit 1; \
+    fi
 RUN sed -i '153i\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ self._update_fun()' /usr/lib/python3/dist-packages/scipy/optimize/_differentiable_functions.py
 RUN sed -i '154i\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ self._update_grad()' /usr/lib/python3/dist-packages/scipy/optimize/_differentiable_functions.py

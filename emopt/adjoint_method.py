@@ -504,44 +504,56 @@ class AdjointMethodEigen(with_metaclass(ABCMeta, object)):
 
     def solve_adjoint(self, params):
         ### Solve the adjoint eigenproblem of (A-nB)*lam=(I-xy^H*B)*dFdx^H
-        b_np = self.calc_dFdx(params)
-        if np.linalg.norm(b_np) < 1E-12:
-            ### b=0 -> lam=0
-            lam = PETSc.Vec().createWithArray(np.zeros_like(b_np))
+        dFdx = self.calc_dFdx(params)
+        dFdx = np.conj(dFdx)
+        if np.linalg.norm(dFdx) < 1E-12:
+            ### g=0 -> lam=0
+            lam = PETSc.Vec().createWithArray(np.zeros_like(dFdx))
             self.lam0 = lam
         else:
-            b = PETSc.Vec().createWithArray(b_np)
-            tmpvec = self.modes._B.createVecRight()
-            self.modes._B.mult(b, tmpvec)
-            alpha = Kahan_dot(self.modes._y[self.modeidx], tmpvec)  ### y^H*(B*b)
+            g = self.modes._B.createVecRight()
+            g.setArray(dFdx.copy())
+            Bg = self.modes._B.createVecRight()
+            self.modes._B.mult(g, Bg)
+            alpha = self.modes._y[self.modeidx].dot(Bg)
+            M = self.modes._A.duplicate(copy=True)
+            M.axpy(-self.modes.neff[self.modeidx], self.modes._B, 
+                   structure=PETSc.Mat.Structure.DIFFERENT_NONZERO_PATTERN)   ### M = A-nB
 
-            rhs = b.duplicate()
-            rhs.copy(b)
-            rhs.axpy(-alpha, self.modes._x[self.modeidx])   ### rhs = b-alpha*x
+            xalpha = self.modes._x[self.modeidx].duplicate()
+            self.modes._x[self.modeidx].copy(xalpha)
+            xalpha.scale(alpha)
+            Pg = g.duplicate()
+            Pg.waxpy(-1.0, xalpha, g)   ### g - x*alpha
+            denom = self.modes._x[self.modeidx].dot(self.modes._x[self.modeidx])
+            beta = self.modes._x[self.modeidx].dot(Pg) / denom
+            Pg.axpy(-beta, self.modes._x[self.modeidx])
 
-            M = self.modes._A.copy()
-            M.axpy(-self.modes.neff[self.modeidx], self.modes._B)   ### M = A-nB
+            nullspace = PETSc.NullSpace().create(vectors=[self.modes._x[self.modeidx]])
+            try:
+                M.setNullSpace(nullspace)
+            except Exception:
+                pass
 
             ksp = PETSc.KSP().create(self.modes._A.getComm())
             ksp.setOperators(M)
-            ksp.setType('gmres')
-            ksp.getPC().setType('none')
+            ksp.setType('preonly')
+            ksp.getPC().setType('lu')
+            ksp.getPC().setFactorSolverType('mumps')
             ksp.setFromOptions()
 
-            lam = rhs.duplicate()
-            ksp.solve(rhs, lam)
+            lam = g.duplicate()
+            ksp.solve(Pg, lam)
             its = ksp.getIterationNumber()
             reason = ksp.getConvergedReason()
             PETSc.Sys.Print(f"KSP converged in {its} iterations with reason {reason}")
-
-            Bx = self.modes._x[self.modeidx].duplicate()
-            self.modes._B.mult(lam, Bx)
-            alpha = Kahan_dot(self.modes._x[self.modeidx], Bx)
-            Bx2 = self.modes._x[self.modeidx].duplicate()
-            self.modes._B.mult(self.modes._x[self.modeidx], Bx2)
-            normx2 = Kahan_dot(self.modes._x[self.modeidx], Bx2)
-            lam.axpy(-alpha/normx2, self.modes._x[self.modeidx])    ### y^H * B * lam = 0
-            self.lam0 = lam
+            
+            yH_lam = self.modes._y[self.modeidx].dot(lam)
+            yH_y = self.modes._y[self.modeidx].dot(self.modes._y[self.modeidx])
+            lam0 = lam.duplicate()
+            lam.copy(lam0)
+            lam0.axpy(-yH_lam/yH_y, self.modes._y[self.modeidx])
+            self.lam0 = lam0
 
     def calc_gradient(self, params):
         """ Calculate dF/dx*dx/dp + dF/dn*dn/dp in the same method
@@ -623,9 +635,9 @@ class AdjointMethodEigen(with_metaclass(ABCMeta, object)):
             dndp = np.real(Kahan_dot(self.modes._y[self.modeidx], tmpvec))
 
             ### dFdx * dxdp
-            dxdp = np.real(Kahan_dot(self.lam0, tmpvec))
-            ### -dFdx * dxdp + dFdn * dndp
-            grad_parts.append(dFdn * dndp - dxdp)
+            dFdx_dxdp = np.real(Kahan_dot(self.lam0, tmpvec))
+            ### dFdx * dxdp + dFdn * dndp
+            grad_parts.append(dFdx_dxdp + dFdn * dndp)
 
             # # revert the parameters
             params[ii] = p0
@@ -795,7 +807,7 @@ class AdjointMethodEigen(with_metaclass(ABCMeta, object)):
 
                 ax3.set_yscale('log', nonposy='clip')
 
-                plt.show()
+                plt.savefig('Check_gradient.png', dpi=600)
 
             if(return_gradients):
                 return error_tot, grad_fd, grad_am
@@ -1689,7 +1701,8 @@ class AdjointMethod(with_metaclass(ABCMeta, object)):
 
                 ax3.set_yscale('log', nonposy='clip')
 
-                plt.show()
+                plt.savefig('Check_gradient.png', dpi=600)
+                plt.close()
 
             if(return_gradients):
                 return error_tot, grad_fd, grad_am

@@ -45,13 +45,14 @@ ARG TARGETARCH
 ENV TARGETARCH=${TARGETARCH}
 
 RUN if [ "$TARGETARCH" = "amd64" ]; then \
-        pip3 install --extra-index-url https://download.pytorch.org/whl/cu121 torch==2.4.1+cu121 networkx==2.8.8; \
+        echo "Installing GPU-PyTorch for amd64" && \
+	pip3 install --extra-index-url https://download.pytorch.org/whl/cu121 torch==2.4.1+cu121 networkx==2.8.8; \
     fi
 
 RUN if [ "$TARGETARCH" = "arm64" ]; then \
-        pip3 install torch==2.4.1 networkx==2.8.8; \
+        echo "Installing CPU-PyTorch for arm64" && \
+	pip3 install torch==2.4.1 networkx==2.8.8; \
     fi
-
 
 RUN sed -i '153i\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ self._update_fun()' /usr/lib/python3/dist-packages/scipy/optimize/_differentiable_functions.py
 RUN sed -i '154i\ \ \ \ \ \ \ \ \ \ \ \ \ \ \ \ self._update_grad()' /usr/lib/python3/dist-packages/scipy/optimize/_differentiable_functions.py

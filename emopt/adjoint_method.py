@@ -197,10 +197,6 @@ from timeit import default_timer as timer
 from datetime import datetime
 import gc
 
-import torch
-torch.set_default_dtype(torch.double)
-torch.set_default_tensor_type(torch.DoubleTensor)
-
 import ctypes
 import ctypes.util
 libc = ctypes.CDLL(ctypes.util.find_library('c'))
@@ -547,7 +543,7 @@ class AdjointMethodEigen(with_metaclass(ABCMeta, object)):
             its = ksp.getIterationNumber()
             reason = ksp.getConvergedReason()
             PETSc.Sys.Print(f"KSP converged in {its} iterations with reason {reason}")
-            
+
             yH_lam = self.modes._y[self.modeidx].dot(lam)
             yH_y = self.modes._y[self.modeidx].dot(self.modes._y[self.modeidx])
             lam0 = lam.duplicate()
@@ -1321,6 +1317,10 @@ class AdjointMethod(with_metaclass(ABCMeta, object)):
         gc.collect()
 
         if self._UseAutoDiff is True:
+            import torch
+            torch.set_default_dtype(torch.double)
+            torch.set_default_tensor_type(torch.DoubleTensor)
+            
             # ksigz = self.ksigz
             paramdiff = torch.zeros(len(params))
             for ii in range(len(params)):

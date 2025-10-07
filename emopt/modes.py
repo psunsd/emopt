@@ -679,7 +679,7 @@ class ModeTE(ModeSolver):
             Hxi[1:] += Hxi[0:-1]
             return np.reshape(Hxi[1:-1] / 2.0, self._fshape)
         else:
-            raise ValueError('Unrecongnized field componenet "%s". The allowed'
+            raise ValueError('Unrecongnized field component "%s". The allowed'
                              'field components are Ez, Hx, Hy.' % (component))
 
     @run_on_master
@@ -1066,7 +1066,9 @@ class ModeTM(ModeTE):
         if(component == 'Hz'): te_comp = 'Ez'
         elif(component == 'Ex'): te_comp = 'Hx'
         elif(component == 'Ey'): te_comp = 'Hy'
-        else: te_comp = 'invalid'
+        else: 
+            raise ValueError('Unrecognized field component "%s".  The allowed'
+                             'field components are Hz, Ex, Ey.' % (component))
 
         field = super(ModeTM, self).get_field_interp(i, te_comp)
 

@@ -196,6 +196,8 @@ from future.utils import with_metaclass
 from timeit import default_timer as timer
 from datetime import datetime
 import gc
+import scipy.sparse as sp
+from scipy.sparse.linalg import lsqr
 
 import ctypes
 import ctypes.util
@@ -206,90 +208,6 @@ __license__ = "BSD-3"
 __version__ = "2023.1.16"
 __maintainer__ = "Peng Sun"
 __status__ = "development"
-
-def estimate_epsilon(A, B, n, kappa_target=1e8, max_iter=20, tol=1e-6):
-    """
-    Estimate perturbation for (A-nB) to achieve a target condition number.
-
-    Parameters:
-    -----------
-    A : PETSc.Mat
-        Matrix A
-    B : PETSc.Mat
-        Matrix B
-    n : complex
-        Eigenvalue
-    kappa_target : float
-        Desired condition number after regularization
-    max_iter : int
-        Maximum iterations for power method
-    tol : float
-        Convergence tolerance
-
-    Returns:
-    --------
-    epsilon_opt : float
-        Suggested regularization parameter
-    kappa_est : float
-        Estimated condition number of (A-nB)
-    """
-    # Build M = A - n B
-    M = A.duplicate(copy=True)
-    M.axpy(-n, B, structure=PETSc.Mat.Structure.DIFFERENT_NONZERO_PATTERN)
-
-    # ----- Estimate sigma_max(M) using power iteration -----
-    vec = M.createVecRight()
-    vec.setRandom()
-    vec.normalize()
-    v_temp = M.createVecRight()
-
-    sigma_max = None
-    for i in range(max_iter):
-        M.mult(vec, v_temp)              # v = M * v
-        norm_v = v_temp.norm()
-        v_temp.copy(vec)
-        vec.scale(1/norm_v)
-        if sigma_max is not None and abs(norm_v - sigma_max) < tol * sigma_max:
-            break
-        sigma_max = norm_v
-
-    if sigma_max is None:
-        raise RuntimeError("Failed to estimate sigma_max.")
-
-    # ----- Estimate sigma_min(M) using inverse power iteration -----
-    ksp = PETSc.KSP().create(comm=A.getComm())
-    ksp.setOperators(M)
-    ksp.setType('preonly')
-    ksp.getPC().setType('lu')
-    ksp.getPC().setFactorSolverType('mumps')
-    ksp.setFromOptions()
-    ksp.setUp()
-
-    vec.setRandom()
-    vec.normalize()
-
-    sigma_min = None
-    for i in range(max_iter):
-        x = vec.duplicate()
-        ksp.solve(vec, x)             # solve M * x = vec
-        norm_x = x.norm()
-        x.scale(1/norm_x)
-        vec = x
-        if sigma_min is not None and abs(1/norm_x - sigma_min) < tol * sigma_min:
-            break
-        sigma_min = 1/norm_x
-
-    if sigma_min is None:
-        raise RuntimeError("Failed to estimate sigma_min.")
-
-    kappa_est = sigma_max / sigma_min
-    epsilon_opt = sigma_max / kappa_target - sigma_min
-    epsilon_opt = max(epsilon_opt, 0)  # ensure non-negative
-
-    PETSc.Sys.Print(f"Est. cond(M) = {kappa_est:.3e}")
-    PETSc.Sys.Print(f"Target epsilon = {epsilon_opt:.3e}")
-
-    return epsilon_opt, kappa_est
 
 class AdjointMethodEigen(with_metaclass(ABCMeta, object)):
     """Adjoint Method Class
@@ -583,9 +501,9 @@ class AdjointMethodEigen(with_metaclass(ABCMeta, object)):
         return self.calc_fom(self.modes, params)
 
     def solve_adjoint(self, params):
-        ### Solve the adjoint eigenproblem of (A-nB)*lam=(I-xy^H*B)*dFdx^H
+        ### Solve the adjoint eigenproblem:
+        ### (A^H-conj(n)*B^H)*lam=dF/dx-(y^H*dF/dx)/(y^H*x)*x
         dFdx = self.calc_dFdx(params)
-        dFdx = np.conj(dFdx)
         if np.linalg.norm(dFdx) < 1E-12:
             ### g=0 -> lam=0
             lam = PETSc.Vec().createWithArray(np.zeros_like(dFdx))
@@ -598,72 +516,69 @@ class AdjointMethodEigen(with_metaclass(ABCMeta, object)):
             arr[:] = dFdx[lo:hi]
             g.assemble()
 
-            ### (I-x y^H B) g
-            Bg = self.modes._B.createVecRight()
-            self.modes._B.mult(g, Bg)
+            ### Pg = g-(y^H*g)/(y^H*x)*x
+            yHg = Kahan_dot(self.modes._y[self.modeidx], g)
+            yHx = Kahan_dot(self.modes._y[self.modeidx], self.modes._x[self.modeidx])
+            alpha = yHg / yHx
+            Pg = g.copy()
+            Pg.axpy(-alpha, self.modes._x[self.modeidx])
 
-            ### alpha = y^H * Bg
-            alpha = Kahan_dot(self.modes._y[self.modeidx], Bg)
+            ### check Pg -| y
+            yHPg = Kahan_dot(self.modes._y[self.modeidx], Pg)
+            if np.abs(yHPg) > 1E-6:
+                print("Orthogonality Pg -| y:", yHPg)
 
-            ### x*alpha
-            xalpha = self.modes._A.createVecRight()
-            xalpha.zeroEntries()
-            xalpha.axpy(alpha, self.modes._x[self.modeidx])
+            ### construct adjoint operator M = A^H - conj(n) * B^H
+            A_H = self.modes._A.copy()
+            A_H = A_H.conjugate().transpose()
+            B_H = self.modes._B.copy()
+            B_H = B_H.conjugate().transpose()
+            M = A_H.duplicate(copy=True)
+            M.axpy(-np.conj(self.modes.neff[self.modeidx]), B_H, 
+                   structure=PETSc.Mat.Structure.DIFFERENT_NONZERO_PATTERN)
+            M.assemble()
+            lam = M.createVecRight()
 
-            ### Pg = g - x * alpha
-            Pg = self.modes._A.createVecRight()
-            Pg.zeroEntries()
-            Pg.axpy(1.0, g)
-            Pg.axpy(-1.0, xalpha)
+            ### Convert to Scipy's LSQR solver
+            ia, ja, a = M.getValuesCSR()
+            nrows, ncols = M.getSize()
+            M_sp = sp.csr_matrix((a, ja, ia), shape=(nrows, ncols))
 
-            ### enforce Pg -| x
-            denom = Kahan_dot(self.modes._x[self.modeidx], self.modes._x[self.modeidx])
-            beta = Kahan_dot(self.modes._x[self.modeidx], Pg) / denom
-            Pg.axpy(-beta, self.modes._x[self.modeidx])
+            Pg_vals = Pg.getArray()
+            lam_sp = lsqr(M_sp, Pg_vals, atol=1e-12, btol=1e-12)[0]
+            lam.setArray(lam_sp.copy())
 
-            ### construct adjoint operator M = A - n B
-            ### Since M is extremely ill-conditioned, perturb M to 
-            ### achieve target cond(M)=1E8
-            epsilon_target, _ = estimate_epsilon(self.modes._A, self.modes._B, self.modes.neff[self.modeidx],
-                                                 kappa_target=1E8)
-            M = self.modes._A.duplicate(copy=True)
-            M.axpy(-self.modes.neff[self.modeidx], self.modes._B, 
-                   structure=PETSc.Mat.Structure.DIFFERENT_NONZERO_PATTERN)   ### M = A-nB
-            M.shift(epsilon_target)
+            ### orthogonality condition x^H B^H lam0 = 0
+            BHlam = B_H.createVecRight()
+            B_H.mult(lam, BHlam)
+            xHBHlam = Kahan_dot(self.modes._x[self.modeidx], BHlam)
+            BHy = B_H.createVecRight()
+            B_H.mult(self.modes._y[self.modeidx], BHy)
+            xHBHy = Kahan_dot(self.modes._x[self.modeidx], BHy)
 
-            ksp = PETSc.KSP().create(self.modes._A.getComm())
-            ksp.setOperators(M)
-            ksp.setType('preonly')
-            ksp.getPC().setType('lu')
-            ksp.getPC().setFactorSolverType('mumps')
-            ksp.setFromOptions()
-
-            lam = g.duplicate()
-            ksp.solve(Pg, lam)
-            its = ksp.getIterationNumber()
-            reason = ksp.getConvergedReason()
-            PETSc.Sys.Print(f"KSP converged in {its} iterations with reason {reason}")
-
-            ### orthogonality y^H B lam0 = 0
-            Blam = self.modes._B.createVecRight()
-            self.modes._B.mult(lam, Blam)
-            yHBlam = Kahan_dot(self.modes._y[self.modeidx], Blam)
-            By = self.modes._B.createVecRight()
-            self.modes._B.mult(self.modes._y[self.modeidx], By)
-            yHBy = Kahan_dot(self.modes._y[self.modeidx], By)
-
-            lam0 =lam.duplicate()
+            lam0 = lam.duplicate()
             lam.copy(lam0)
-            lam0.axpy(-yHBlam/yHBy, self.modes._y[self.modeidx])
+            lam0.axpy(-xHBHlam/xHBHy, self.modes._y[self.modeidx])
+
+            Bx = self.modes._B.createVecRight()
+            self.modes._B.mult(self.modes._x[self.modeidx], Bx)
+            lam0Bx = Kahan_dot(lam0, Bx) / (lam0.norm() * self.modes._x[self.modeidx].norm())
+            if np.abs(lam0Bx) > 1E-12:
+                print("Orthogonality lam0 -| Bx:", lam0Bx)
+
             self.lam0 = lam0
 
     def calc_gradient(self, params):
         """ Calculate dF/dx*dx/dp + dF/dn*dn/dp in the same method
         
         dn/dp is calculated via Hellman-Feynman theorem: y^H*dA/dp*x
-        dF/dx*dx/dp is calculated via the adjoint problem of (A-nB)*lam=(I-xy^H)*dF/dx^H
+        dF/dx*dx/dp is calculated via the adjoint problem of 
+        (A^H - conj(n) B^H) * lam = dF/dx - (y^H*dF/dx) / (y^H*x) * x
+        The LHS operator of the adjoint system is rank deficient by at least 1, 
+        so there are infinitely many solutions.  We take the solution lam0 that satisfies
+        the orthogonality condition x^H * B^H * lam0 = 0, which can be calculated via
+        lam0 = lam - (x^H B^H lam)/(x^H B^H y) * y
 
-        dn/dp is computed with Hellman-Feynman theorem: y^H * dA/dp * x:
         math:`A` with respect to the design parameters of
         the system, i.e. :math:`\partial A / \partial p_i`. In the most general
         case, we can compute this derivative using finite differences. This
@@ -737,7 +652,7 @@ class AdjointMethodEigen(with_metaclass(ABCMeta, object)):
             dndp = np.real(Kahan_dot(self.modes._y[self.modeidx], tmpvec))
 
             ### dFdx * dxdp
-            dFdx_dxdp = np.real(Kahan_dot(self.lam0, tmpvec))
+            dFdx_dxdp = -np.real(Kahan_dot(self.lam0, tmpvec))
             ### Total gradient (excluding dF/dp) = dFdx * dxdp + dFdn * dndp
             grad_parts.append(dFdx_dxdp + dFdn * dndp)
 

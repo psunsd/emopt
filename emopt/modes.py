@@ -552,13 +552,8 @@ class ModeTE(ModeSolver):
         for i in range(neigs):
             self.neff[i] = self._solver.getEigenvalue(i)
             self._solver.getEigenvector(i, self._x[i])
-            ### get left eigenvector and normalize
+            ### get left eigenvector
             self._solver.getLeftEigenvector(i, self._y[i])
-            tmpvec = self._B.createVecRight()
-            self._B.mult(self._x[i], tmpvec)
-            yBx = Kahan_dot(self._y[i], tmpvec)
-            self._y[i].scale(1/np.conjugate(yBx))
-            tmpvec.destroy()
 
             # Save the full result on the master node so it can be accessed in the
             # future
@@ -1655,13 +1650,8 @@ class ModeFullVector(ModeSolver):
         for i in range(neigs):
             self.neff[i] = self._solver.getEigenvalue(i)
             self._solver.getEigenvector(i, self._x[i])
-            ### get left eigenvector and normalize
+            ### get left eigenvector
             self._solver.getLeftEigenvector(i, self._y[i])
-            tmpvec = self._B.createVecRight()
-            self._B.mult(self._x[i], tmpvec)
-            yBx = Kahan_dot(self._y[i], tmpvec)
-            self._y[i].scale(1/np.conjugate(yBx))
-            tmpvec.destroy()
 
     def __permute_field_component(self, component):
         ## Permute the field components to account for planes with non-z normal

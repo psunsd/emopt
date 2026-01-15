@@ -14,7 +14,7 @@ else
 	endif
 endif
 
-CXXFLAGS = -Wall -fopenmp -O3 -march=native -DNDEBUG -std=c++11
+CXXFLAGS = -Wall -fopenmp -O3 -march=X86-64-V3 -DNDEBUG -std=c++11
 
 INCLUDES = -I${EIGEN_DIR} -I${BOOST_DIR} -I/usr/include/eigen3
 LDFLAGS = -lpthread
